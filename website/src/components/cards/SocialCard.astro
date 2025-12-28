@@ -1,0 +1,175 @@
+---
+import social from "@/collections/social.json";
+import OptimizedImage from "@/components/widgets/OptimizedImage.astro";
+
+const { displaySocialIds } = Astro.props;
+// Configure which social media IDs to display (empty array shows all)
+//const displaySocialIds: number[] = [1, 2, 3]; // Only show social media with IDs 1, 2, 3
+// const displaySocialIds: number[] = []; // Show all (when array is empty)
+
+const filteredSocial = social.filter(item => {
+  // Check if isShow property exists and is false
+  if ('isShow' in item && item.isShow === false) return false;
+  if (displaySocialIds.length > 0) {
+    return displaySocialIds.includes(item.id);
+  }
+  return true;
+});
+---
+
+<div class="social-cards-wrapper">
+  <div class="social-list">
+    {filteredSocial.map((item, index) => (
+      <a
+        href={item.url}
+        target="_blank"
+        rel="noopener noreferrer"
+        class="social-item"
+        style={`--index: ${index}; --total: ${filteredSocial.length};`}
+      >
+        <OptimizedImage
+          src={item.image}
+          alt={item.name}
+          class="social-image"
+          width={72}
+          height={72}
+          formats={["webp", "avif", "jpeg"]}
+          loading="lazy"
+        />
+        <div class="social-info">
+          <div class="social-username">
+            @{item.username}
+          </div>
+        </div>
+      </a>
+    ))}
+  </div>
+</div>
+
+<style>
+  .social-cards-wrapper {
+    position: relative;
+    width: 100%;
+  }
+
+  .social-list {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    /* Desktop: fixed container height for stacking effect */
+    height: 70px;
+  }
+
+  /* Mobile: adaptive height */
+  @media (max-width: 768px) {
+    .social-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem; /* gap-2 = 0.5rem */
+      height: auto;
+      justify-content: center;
+    }
+  }
+
+  .social-item {
+    position: relative;
+    overflow: hidden;
+    border-radius: 0.75rem; /* rounded-xl */
+    cursor: pointer;
+    /* Separate transitions for transform and z-index */
+
+    transition: transform 0.6s cubic-bezier(0.34, 1.2, 0.64, 1),
+                z-index 0s linear 0.6s,
+                box-shadow 0.3s ease;
+    transition-delay: calc(var(--index) * 0.03s);
+    width: 72px;
+    height: 72px;
+  }
+  /* Desktop: stacking effect */
+  @media (min-width: 769px) {
+    .social-item {
+      position: absolute;
+      left: 0;
+      /* Initial state: overlapping + slight rotation to the right */
+      transform: translateX(calc(var(--index) * 3px)) rotate(calc(var(--index) * 5deg));
+      /* Smaller ID has larger z-index (on top) */
+      z-index: calc(var(--total) - var(--index));
+    }
+  }
+
+  /* Mobile: normal arrangement */
+  @media (max-width: 768px) {
+    .social-item {
+      position: relative;
+      transform: none;
+      transition-delay: 0s;
+    }
+  }
+
+  /* Desktop hover effect: expand to the right */
+  @media (min-width: 769px) {
+    .social-list:hover .social-item {
+      /* Expand to the right: ID 1 stays in place, subsequent ones move right */
+      transform: translateX(calc(var(--index) * 85px)) rotate(0deg);
+      /* Reverse z-index when expanded: right cards on top, avoid overlap flicker when retracting */
+      z-index: calc(var(--index) + 100);
+      /* Switch z-index immediately when expanding, delay when retracting */
+      transition: transform 0.6s cubic-bezier(0.34, 1.2, 0.64, 1),
+                  z-index 0s linear 0s,
+                  box-shadow 0.3s ease;
+      transition-delay: calc(var(--index) * 0.03s);
+    }
+
+    .social-list:hover .social-item:hover {
+      /* Currently hovered card: bounce up + slight rotation */
+      transform: translateX(calc(var(--index) * 80px)) translateY(-10px) rotate(-6deg) scale(1.05);
+      z-index: 9999;
+      /* Shorten transition time on hover for more responsive feel */
+      transition: transform 0.35s cubic-bezier(0.34, 1.5, 0.64, 1),
+                  z-index 0s linear 0s,
+                  box-shadow 0.3s ease;
+    }
+  }
+
+  /* Image styles */
+  .social-image {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 0.75rem; /* rounded-xl */
+    transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+
+  .social-item:hover .social-image {
+    transform: scale(1.15); /* More noticeable zoom */
+  }
+
+  /* Username info */
+  .social-info {
+    position: absolute;
+    bottom: 6px;
+    left: 6px;
+    z-index: 10;
+    transition: opacity 0.3s;
+  }
+
+  .social-username {
+    font-size: 8px;
+    color: rgba(255, 255, 255, 0.85);
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  }
+
+  /* Add shadow on hover - enhance effect */
+  .social-item:hover {
+    box-shadow: 0 15px 32px rgba(0, 0, 0, 0.15),
+                0 5px 12px rgba(0, 0, 0, 0.1);
+  }
+
+  /* Mobile optimization */
+  @media (max-width: 768px) {
+    .social-item:active {
+      transform: scale(0.95);
+    }
+  }
+</style>

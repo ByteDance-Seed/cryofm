@@ -1,0 +1,143 @@
+---
+import Button from "../components/ui/Button.astro";
+import { siteConfig } from "@/config/site";
+import HeroCard from "@/components/home/HeroCard.astro";
+import Layout from "@/layouts/Layout.astro";
+import BlogSection from "@/components/sections/BlogSection.astro";
+import SocialCard from "@/components/cards/SocialCard.astro";
+import AnimatedText from "@/components/ui/AnimatedText.astro";
+import ResearchAreas from "@/components/sections/ResearchAreas.astro";
+import Mission from "@/components/sections/Mission.astro";
+import { resolveUrl } from "@/utils/url";
+---
+
+<Layout
+  title="ByteDance AI4Science | AI for Cryo-EM"
+  description="AI for Cryo-EM: a research direction within ByteDance AI4Science, advancing cryo-electron microscopy through machine learning and computational methods."
+  keywords="CryoEM, Cryo-electron Microscopy, AI for CryoEM, AI4Science, Structural Biology, Computational CryoEM, ByteDance"
+>
+
+  <div
+    class="relative site-container z-20  w-full mx-auto mt-16 px-4 md:mt-18 lg:mt-20 xl:px-0"
+  >
+    <div class="relative w-full px-4 flex flex-col items-center justify-between md:flex-row mb-16 ">
+      <div class="relative w-full md:max-w-[450px] md:w-1/2 text-center sm:text-left sm:-mt-8">
+        <!-- Title - AnimatedText animation -->
+        <h1 class="mb-2">
+          <AnimatedText
+            content="AI for CryoEM"
+            delay={0.1}
+            duration={0.5}
+            stagger={0.08}
+            class="text-5xl text-pri leading-tight md:text-4xl lg:text-6xl font-brand "
+          />
+        </h1>
+        <div class="mb-4">
+          <AnimatedText
+            content="ByteDance Seed AI4Science team"
+            delay={0.2}
+            duration={0.5}
+            stagger={0.06}
+            class="text-primary font-brand text-lg md:text-xl lg:text-2xl leading-snug"
+          />
+        </div>
+
+        <!-- First description - AnimatedText animation -->
+        <div class="mb-2">
+          <AnimatedText
+            content="We advance cryo-electron microscopy through artificial intelligence and computational methods. Our research focuses on building next-generation algorithms that enhance structure determination."
+            delay={0.3}
+            duration={0.5}
+            stagger={0.015}
+            class="body-text"
+          />
+        </div>
+
+        <!-- Second description - AnimatedText animation -->
+        <div class="mb-4">
+          <AnimatedText
+            content="We develop cutting-edge open-source tools and models that help accelerate structural biology research and bridge modern machine learning with fundamental cryo-EM methodologies."
+            delay={0.5}
+            duration={0.5}
+            stagger={0.015}
+            class="body-text"
+          />
+        </div>
+
+        <!-- Button - AOS animation -->
+        <div
+          class=""
+          data-aos="fade-up-sm"
+          data-aos-delay="900"
+          data-aos-duration="500"
+          data-aos-once="true"
+        >
+          <Button url={"https://seed.bytedance.com/en/direction/ai_for_science"} type="fill" className="m-auto mt-4 text-center sm:text-left sm:m-0 sm:mt-6 w-full max-w-[260px]">
+            Visit Seed AI4Science
+          </Button>
+        </div>
+
+        <!-- Social Cards - AOS animation -->
+        <div
+          class="social mt-8 mb-8"
+          data-aos="fade-up-sm"
+          data-aos-delay="1000"
+          data-aos-duration="600"
+          data-aos-once="true"
+        >
+          <SocialCard displaySocialIds={[1, 2, 3, 4]}/>
+        </div>
+      </div>
+
+      <!-- HeroCard - AOS animation -->
+      <div
+        class="relative justify-end w-full mt-16 md:flex md:pl-10 md:w-1/2 md:mt-0 md:translate-y-4 xl:translate-y-0"
+        data-aos="fade-left-sm"
+        data-aos-delay="300"
+        data-aos-duration="800"
+        data-aos-once="true"
+      >
+        <HeroCard
+          imageUrl={"https://lf3-nlp-opensource.bytetos.com/obj/nlp-opensource/cryofm/images/cellulose-synthase.png"}
+          title="Exploring the Microscopic World"
+          link=""
+        />
+      </div>
+    </div>
+  </div>
+
+  <section
+    class="mt-8 mb-4 sm:mt-10 sm:mb-6 md:mt-12 md:mb-8"
+    data-aos="fade-up-sm"
+    data-aos-delay="100"
+    data-aos-duration="600"
+    data-aos-once="true"
+  >
+    <Mission />
+  </section>
+
+  <section
+    class="mt-8 mb-4 sm:mt-10 sm:mb-6 md:mt-12 md:mb-8"
+    data-aos="fade-up-sm"
+    data-aos-delay="100"
+    data-aos-duration="600"
+    data-aos-once="true"
+  >
+    <ResearchAreas title="Research Areas" />
+  </section>
+
+  <section
+    class="mt-8 mb-2 sm:mt-10 sm:mb-3 md:mt-12 md:mb-4"
+    data-aos="fade-up-sm"
+    data-aos-delay="100"
+    data-aos-duration="600"
+    data-aos-once="true"
+  >
+    <BlogSection
+      title="Latest Publications"
+      description="Our latest research publications, technical notes, and insights on cryo-EM and AI4Science."
+      showViewAllButton={true}
+    />
+  </section>
+
+</Layout>

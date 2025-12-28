@@ -1,0 +1,75 @@
+---
+import Button from "@/components/ui/Button.astro";
+
+export interface LinkItem {
+  label: string;
+  href: string;
+  kind?: "paper" | "preprint" | "code" | "guide";
+}
+
+export interface Props {
+  items: LinkItem[];
+  className?: string;
+}
+
+const { items = [], className = "" } = Astro.props;
+---
+
+<div class={`flex flex-wrap gap-3 mt-3 ${className}`}>
+  {items.map((item) => (
+    <Button url={item.href} type="fill" target="_blank" size="sm">
+      <span class="inline-flex items-center gap-2">
+        {
+          item.kind === "code" ? (
+            // GitHub / code icon
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              class="w-4 h-4"
+              fill="currentColor"
+            >
+              <path
+                d="M12 2C6.48 2 2 6.58 2 12.26c0 4.5 2.87 8.31 6.84 9.66.5.1.68-.22.68-.49 0-.24-.01-1.04-.02-1.88-2.78.62-3.37-1.22-3.37-1.22-.45-1.18-1.1-1.5-1.1-1.5-.9-.63.07-.62.07-.62 1 .07 1.53 1.06 1.53 1.06.89 1.56 2.34 1.11 2.91.85.09-.66.35-1.11.63-1.37-2.22-.26-4.56-1.14-4.56-5.07 0-1.12.39-2.03 1.03-2.74-.1-.26-.45-1.3.1-2.7 0 0 .84-.27 2.75 1.04A9.2 9.2 0 0 1 12 6.08c.85 0 1.71.12 2.51.35 1.9-1.31 2.74-1.04 2.74-1.04.55 1.4.2 2.44.1 2.7.64.71 1.03 1.62 1.03 2.74 0 3.94-2.34 4.8-4.57 5.06.36.32.68.95.68 1.92 0 1.39-.01 2.51-.01 2.85 0 .27.18.59.69.49A10.01 10.01 0 0 0 22 12.26C22 6.58 17.52 2 12 2Z"
+              />
+            </svg>
+          ) : item.kind === "guide" ? (
+            // User guide / document icon
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              class="w-4 h-4"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M5 4h9l5 4v12H5z" />
+              <path d="M14 4v4h5" />
+              <path d="M9 10h6" />
+              <path d="M9 14h4" />
+            </svg>
+          ) : (
+            // Default paper / preprint icon
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              class="w-4 h-4"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M7 3h7l5 5v13H7z" />
+              <path d="M14 3v5h5" />
+            </svg>
+          )
+        }
+        <span>{item.label}</span>
+      </span>
+    </Button>
+  ))}
+</div>
+
+

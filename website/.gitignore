@@ -1,0 +1,52 @@
+# Astro
+.astro/
+dist/
+.output/
+
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Node.js
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+.pnpm-debug.log*
+
+# Environment variables
+.env
+.env.local
+.env.production
+.env.production.local
+.env.*.local
+
+# Build outputs
+*.tsbuildinfo
+.next/
+.nuxt/
+.vite/
+.turbo/
+
+# Testing
+coverage/
+.nyc_output/
+
+# Cache
+.cache/
+.parcel-cache/
+.eslintcache
+.stylelintcache
+
+# IDE (project-specific)
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

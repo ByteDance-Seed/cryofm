@@ -1,0 +1,245 @@
+---
+title: "CryoFM: A Flow-based Foundation Model<br/>for Cryo-EM Densities"
+publishDate: 2024-10-15
+read: 6
+description: CryoFM is a flow-matching-based foundation model that learns a generative prior over biomolecular density maps.
+img: "/assets/blog/cryofm1/cover-cryofm1.jpg"
+tags:
+  - Foundation Model
+  - Cryo-EM Density
+  - Density Modification
+  - ICLR
+featured: false
+---
+
+import OptimizedImage from "@/components/widgets/OptimizedImage.astro";
+
+> **TL;DR.**   
+> CryoFM is a flow matching based **foundation model** that learns a generative prior over **biomolecular density maps**.
+> It enables flexible posterior sampling for diverse cryo-EM and cryo-ET tasks without fine-tuning, achieving state-of-the-art results.
+
+<div class="mt-3 flex justify-center items-center gap-3 text-xs sm:text-sm md:text-base whitespace-nowrap text-neutral-700 dark:text-neutral-300 overflow-x-auto">
+  <a
+    href="https://openreview.net/forum?id=T4sMzjy7fO"
+    target="_blank"
+    rel="noreferrer"
+    class="inline-flex items-center gap-1 font-medium hover:underline"
+  >
+    <span>📄</span>
+    <span>OpenReview</span>
+  </a>
+  <span class="text-neutral-400">·</span>
+  <a
+    href="https://arxiv.org/abs/2410.08631"
+    target="_blank"
+    rel="noreferrer"
+    class="inline-flex items-center gap-1 font-medium hover:underline"
+  >
+    <span>📄</span>
+    <span>arXiv</span>
+  </a>
+  <span class="text-neutral-400">·</span>
+  <a
+    href="https://github.com/ByteDance-Seed/cryofm"
+    target="_blank"
+    rel="noreferrer"
+    class="inline-flex items-center gap-1 font-medium hover:underline"
+  >
+    <span>💻</span>
+    <span>Code</span>
+  </a>
+  <span class="text-neutral-400">·</span>
+  <a
+    href="https://bytedance-seed.github.io/cryofm/docs/"
+    target="_blank"
+    rel="noreferrer"
+    class="inline-flex items-center gap-1 font-medium hover:underline"
+  >
+    <span>📖</span>
+    <span>User Guides</span>
+  </a>
+  <span class="text-neutral-400">·</span>
+  <a
+    href="https://doi.org/10.5281/zenodo.18013604"
+    target="_blank"
+    rel="noreferrer"
+    class="inline-flex items-center gap-1 font-medium hover:underline"
+  >
+    <span>📊</span>
+    <span>Data list</span>
+  </a>
+</div>
+
+## Overview
+
+Cryo-electron microscopy (cryo-EM) is a powerful technique in structural biology and drug discovery, enabling the study of biomolecules at high resolution. 
+Significant advancements by structural biologists using cryo-EM have led to the production of around 50k protein density maps at various resolutions on EMDB.[^emdb-count] 
+However, cryo-EM data processing algorithms have yet to fully benefit from our knowledge of biomolecular density maps, with only a few recent models being data-driven but limited to specific tasks. 
+In this study, we present cryoFM, a foundation model designed as a generative model, learning the distribution of high-quality density maps and generalizing effectively to downstream tasks. 
+Built on flow matching, cryoFM is trained to accurately capture the prior distribution of biomolecular density maps. Furthermore, we introduce a flow posterior sampling method that leverages cryoFM 
+as a flexible prior for several downstream tasks in cryo-EM and cryo-electron tomography (cryo-ET) without the need for fine-tuning, achieving state-of-the-art performance on most tasks and demonstrating 
+its potential as a foundational model for broader applications in these fields.
+
+<video src="https://lf3-nlp-opensource.bytetos.com/obj/nlp-opensource/cryofm/videos/cryofm.mp4" class="img-large" controls autoplay loop muted playsinline></video>
+<small class="block article-caption">
+  What cryoFM enables.
+</small>
+
+In the training stage, cryoFM learns a vector field $\mathbf{v}_t(\mathbf{x}_t)$, whose corresponding probability flow generates the data
+distribution $p_0(\mathbf{x}_0)$ of high-quality protein densities. In the inference stage, given a degraded observation $\mathbf{y}$, a likelihood
+term $p_t(\mathbf{y} \mid \mathbf{x}_t)$ is incorporated to convert the unconditional vector field $\mathbf{v}_t(\mathbf{x}_t)$ to a conditional one
+$\mathbf{v}_t(\mathbf{x}_t \mid \mathbf{y})$, so that we can sample from the posterior distribution $p_0(\mathbf{x}_0 \mid \mathbf{y})$. This enables
+signal restoration of the density map, resulting in improved resolution of the alpha helices in the shown case.
+
+**Key Contributions**
+- **Density-space foundation model:** learns a generalizable prior over macromolecular density distributions.
+- **Bayesian, controllable inference:** enables posterior sampling by combining the learned prior with a likelihood function defined by physics-based forward operators.
+
+
+## Method at a Glance
+### Flow matching prior
+CryoFM employs flow matching to learn a generative prior over biomolecular density maps, enabling flexible posterior sampling for diverse downstream tasks without fine-tuning. Specifically:
+- **Data:** 3D density patches (e.g., $64^3$), unsupervised pre-training on curated EMDB deposited maps
+- **Model:** 3D HDiT[^hdit] predicting velocity for ODE-based generation
+
+The following picture shows cryoFM's architecture. The side length $D$ of the input $\mathbf{x}_t$ undergoes dimension reduction through down-sampling 
+layers and is then expanded back to its original size. To minimize computational cost near the input and output, 
+the model employs neighborhood attention (NA). Neighborhood attention only attend to a localized area, whereas global attention (GA) 
+calculates attention across all positions.
+
+<OptimizedImage src="/assets/blog/cryofm1/hdit3d_arch.jpg" class="img-large" alt="hdit3d_arch" formats={["webp", "avif", "jpeg"]} loading="lazy" />
+<small class="block article-caption">
+  CryoFM's architecture.
+</small>
+
+CryoFM adopts the network architecture proposed in the HDiT paper[^hdit]. The attention mechanism in CryoFM employs two complementary strategies: neighborhood attention (NA) and global attention (GA). 
+NA focuses on local spatial relationships within a constrained region, reducing computational complexity while maintaining fine-grained local features. 
+In contrast, GA captures long-range dependencies across the entire volume, enabling the model to integrate global structural information. 
+The following figure illustrates the QKV (Query, Key, Value) structure of both attention mechanisms, highlighting their distinct computational patterns.
+
+<OptimizedImage src="/assets/blog/cryofm1/attn_details.jpg" class="img-medium" alt="attn_details" formats={["webp", "avif", "jpeg"]} loading="lazy" />
+<small class="block article-caption">
+  Illustration of QKV structure of neighborhood attention (NA) and global attention (GA).
+</small>
+
+
+
+### Flow Posterior Sampling
+
+Given a degraded observation $\mathbf{y}$, we recover the clean signal $\mathbf{x}_0$ by combining the learned prior with the likelihood function through the following algorithm:
+
+<div class="algorithm-block">
+  <div class="algorithm-title">Algorithm 1: Flow Posterior Sampling</div>
+  
+  <div class="algorithm-require">
+    <div class="algorithm-require-title">Require:</div>
+    <div class="algorithm-require-item">$v_\Theta$: pretrained vector field $[0, 1] \times \mathbb{R}^n \to \mathbb{R}^n$</div>
+    <div class="algorithm-require-item">$A$: forward operator $\mathbb{R}^n \to \mathbb{R}^m$</div>
+    <div class="algorithm-require-item">$\mathbf{y}$: observation $\in \mathbb{R}^m$</div>
+    <div class="algorithm-require-item">$N$: number of steps</div>
+    <div class="algorithm-require-item">$\lambda_{\max}$: maximum step size</div>
+  </div>
+
+  <div class="algorithm-ensure">
+    <div class="algorithm-ensure-title">Ensure:</div>
+    <div class="algorithm-ensure-item">$\mathbf{x}_0$: recovered signal</div>
+  </div>
+
+  <div class="algorithm-steps">
+    <div class="algorithm-step">
+      <div class="algorithm-step-number">1:</div>
+      <div class="algorithm-step-content">$\Delta t \leftarrow 1 / N$</div>
+    </div>
+    <div class="algorithm-step">
+      <div class="algorithm-step-number">2:</div>
+      <div class="algorithm-step-content">$\mathbf{x}_1 \leftarrow \mathcal{N}(0, I)$ <span class="algorithm-step-comment">// Initialize from standard normal</span></div>
+    </div>
+    <div class="algorithm-step">
+      <div class="algorithm-step-number">3:</div>
+      <div class="algorithm-step-content"><strong>for</strong> $t \in [1, 1-\Delta t, 1-2\Delta t, \ldots, \Delta t]$ <strong>do</strong></div>
+    </div>
+    <div class="algorithm-step">
+      <div class="algorithm-step-number">4:</div>
+      <div class="algorithm-step-content algorithm-step-content-indented">$\mathbf{x}'_{t-\Delta t} \leftarrow \mathbf{x}_t - \Delta t \cdot v_\Theta(t, \mathbf{x}_t)$</div>
+    </div>
+    <div class="algorithm-step">
+      <div class="algorithm-step-number">5:</div>
+      <div class="algorithm-step-content algorithm-step-content-indented">$l(\mathbf{x}_t) \leftarrow \|\mathbf{y} - A \hat{\mathbf{x}}_0(\mathbf{x}_t)\|^2$ <span class="algorithm-step-comment">// Likelihood loss</span></div>
+    </div>
+    <div class="algorithm-step">
+      <div class="algorithm-step-number">6:</div>
+      <div class="algorithm-step-content algorithm-step-content-indented">$\mathbf{g} \leftarrow \nabla_{\mathbf{x}_t} l(\mathbf{x}_t) / \|\nabla_{\mathbf{x}_t} l(\mathbf{x}_t)\|_2$ <span class="algorithm-step-comment">// Normalize gradient for numerical stability</span></div>
+    </div>
+    <div class="algorithm-step">
+      <div class="algorithm-step-number">7:</div>
+      <div class="algorithm-step-content algorithm-step-content-indented">$\lambda'_t \leftarrow \min\{\lambda_{\max}, t / (1 - t)\}$ <span class="algorithm-step-comment">// Prevent the weighting term from being too large</span></div>
+    </div>
+    <div class="algorithm-step">
+      <div class="algorithm-step-number">8:</div>
+      <div class="algorithm-step-content algorithm-step-content-indented">$\mathbf{x}_{t-\Delta t} \leftarrow \mathbf{x}'_{t-\Delta t} - \lambda'_t \mathbf{g}$</div>
+    </div>
+    <div class="algorithm-step">
+      <div class="algorithm-step-number">9:</div>
+      <div class="algorithm-step-content"><strong>end for</strong></div>
+    </div>
+    <div class="algorithm-step">
+      <div class="algorithm-step-number">10:</div>
+      <div class="algorithm-step-content"><strong>return</strong> $\mathbf{x}_0$</div>
+    </div>
+  </div>
+</div>
+
+The algorithm iteratively refines the signal by:
+1. Following the learned prior through the vector field $v_Θ$
+2. Incorporating the likelihood constraint via gradient guidance
+3. Using adaptive step sizes to ensure numerical stability
+
+We demonstrate the effectiveness of our method on 4 synthetic tasks: Spectral noise de-noising, Anisotropic noise de-noising, Missing wedge in-painting, *Ab initio* modeling.
+
+## Results on 4 tasks
+### Spectral noise de-noising
+<OptimizedImage src="/assets/blog/cryofm1/spectral.jpg" class="img-large" alt="spectral" formats={["webp", "avif", "jpeg"]} loading="lazy" />
+<small class="block article-caption">
+  Result of the spectral noise denoising task. Two density maps from EMDB were added spectral noise so that the estimated resolution is 4.3 $\AA$ 
+  The degraded density maps (results after applying the forward model) were filtered by `relion_postprocess` for visual clarity.
+</small>
+
+### Anisotropic noise de-noising
+<OptimizedImage src="/assets/blog/cryofm1/anisotropic.jpg" class="img-large" alt="anisotropic" formats={["webp", "avif", "jpeg"]} loading="lazy" />
+<small class="block article-caption">
+  Result of the anisotropic noise denoising task. Two density maps from EMDB are added anisotropic spectral noise that the estimated 
+  resolution is 4.38 $\AA$. The degraded density maps are filtered by `relion_postprocess` for visual clarity.
+</small>
+
+### Missing wedge in-painting
+<OptimizedImage src="/assets/blog/cryofm1/missing_wedge.jpg" class="img-large" alt="missing_wedge" formats={["webp", "avif", "jpeg"]} loading="lazy" />
+<small class="block article-caption">
+  Result of the missing wedge restoration task. Two maps from EMDB are masked in Fourier space to simulate the missing wedge effect in cryo-ET. 
+  The central slices through the maps are also shown.
+</small>
+
+### *Ab initio* modeling
+<OptimizedImage src="/assets/blog/cryofm1/abinitio.jpg" class="img-large" alt="abinitio" formats={["webp", "avif", "jpeg"]} loading="lazy" />
+<small class="block article-caption">
+  Result of the *ab initio* modeling task. One synthetic data and two real data are shown.
+</small>
+
+## Citation
+
+If you find CryoFM helpful, please cite:
+```bibtex
+@inproceedings{
+zhou2025cryofm,
+title={Cryo{FM}: A Flow-based Foundation Model for Cryo-{EM} Densities},
+author={Yi Zhou and Yilai Li and Jing Yuan and Quanquan Gu},
+booktitle={The Thirteenth International Conference on Learning Representations},
+year={2025},
+url={https://openreview.net/forum?id=T4sMzjy7fO}
+}
+```
+
+
+[^emdb-count]: As of 17 December 2025, the Electron Microscopy Data Bank (EMDB) lists 52,575 cryo-EM map entries; see the official statistics at [EMDB](https://www.ebi.ac.uk/emdb/). 
+[^hdit]: Hourglass Diffusion Transformer (HDiT) is introduced in *"Scalable High-Resolution Pixel-Space Image Synthesis with Hourglass Diffusion Transformers"* by Crowson et al., 2024; see [arXiv:2401.11605](https://arxiv.org/abs/2401.11605). 
+
+

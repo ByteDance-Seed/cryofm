@@ -1,0 +1,19 @@
+---
+import OptimizedImage from "@/components/widgets/OptimizedImage.astro";
+import { resolveUrl } from "@/utils/url";
+---
+
+<a
+  href={resolveUrl("/")}
+  class="h-10 text-base group relative z-30 flex items-center"
+>
+  <OptimizedImage 
+    src="/assets/logo.png" 
+    alt="Logo" 
+    class="h-10 w-auto" 
+    width={120}
+    height={40}
+    loading="eager"
+  />
+</a>
+

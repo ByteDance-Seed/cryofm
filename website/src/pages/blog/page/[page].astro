@@ -1,0 +1,62 @@
+---
+import Layout from "@/layouts/Layout.astro";
+import PageHeader from "@/components/elements/PageHeader.astro";
+import BlogSection from "@/components/sections/BlogSection.astro";
+import { getCollection } from "astro:content";
+
+// Define number of posts per page
+export const POSTS_PER_PAGE = 6;
+
+// According to Astro v5/v6, for pagination routes in SSG mode, getStaticPaths() is still required
+// This is because we need to tell Astro which pages to generate at build time
+// Note: params must be string type (v6 requirement)
+export async function getStaticPaths() {
+  const allPosts = await getCollection("post");
+
+  // Sort posts by publish date
+  let posts = allPosts.sort(
+    (a, b) => b.data.publishDate.valueOf() - a.data.publishDate.valueOf()
+  );
+
+  // Find featured post (featured post will be displayed both at the top and in the main list)
+  const featuredPost = posts.find((post) => post.data.featured);
+
+  // Calculate total pages using all posts count (including featured post)
+  const totalPages = Math.ceil(posts.length / POSTS_PER_PAGE);
+
+  // Return all pagination paths, ensure params.page is string type (v6 requirement)
+  return Array.from({ length: totalPages }, (_, i) => {
+    const page = i + 1;
+    return {
+      params: { page: page.toString() },
+      props: { page: page.toString() }
+    };
+  });
+}
+
+// Get page number from props (passed via getStaticPaths in SSG mode)
+const { page } = Astro.props;
+const currentPage = parseInt(page);
+---
+
+<Layout title={`Publications - Page ${currentPage}`}>
+  <section class="relative z-20 container mx-auto my-12 px-7 lg:px-0">
+    <PageHeader
+      title="Publications"
+      description="Explore our publications on AI for CryoEM. Feel free to follow the updates!"
+    />
+  </section>
+  <section class="relative z-20 mx-auto my-12 px-7 lg:px-0">
+    <div class="mt-12">
+      <BlogSection
+        title="All Articles"
+        listPage={true}
+        pagination={{
+          enable: true,
+          currentPage: currentPage
+        }}
+        postsPerPage={POSTS_PER_PAGE}
+      />
+    </div>
+  </section>
+</Layout>

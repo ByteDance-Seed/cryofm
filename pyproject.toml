@@ -1,0 +1,90 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cryofm"
+dynamic = ["version"]
+description = "CryoEM foundation model project"
+readme = "README.md"
+requires-python = ">=3.8"
+license = "Apache-2.0"
+authors = [
+    {name = "Yi Zhou", email = "zhouyi.naive@bytedance.com"},
+    {name = "Yilai Li", email = "yilai.li@bytedance.com"},
+    {name = "Jing Yuan", email = "yuanjing.eugene@bytedance.com"},
+]
+keywords = ["cryoem", "foundation-model", "deep-learning"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering",
+]
+
+dependencies = [
+    "pandas",
+    "numpy",
+    "torch",
+    "scipy",
+    "mmengine",
+    "monai",
+    "mrcfile",
+    "xmltodict",
+    "requests",
+    "accelerate",
+    "tqdm",
+    "einops",
+    "diffusers",
+    "safetensors",
+    "lightning",
+    "torchdiffeq",
+    "filelock",
+    "scikit-image",
+    "wandb",
+    "mmcv-lite",
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+cfm = "cryofm.cli:main"
+
+[project.urls]
+Homepage = "https://bytedance-seed.github.io/cryofm/"
+Documentation = "https://bytedance-seed.github.io/cryofm/docs/"
+Repository = "https://github.com/ByteDance-Seed/cryofm"
+Issues = "https://github.com/ByteDance-Seed/cryofm/issues"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.dynamic]
+version = {attr = "cryofm.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py38"
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+]
+ignore = []
+
+[tool.ruff.per-file-ignores]
+"__init__.py" = ["F401"]  # Allow unused imports in __init__.py
+

@@ -1,0 +1,222 @@
+---
+import { getCollection, render } from "astro:content";
+import PostLayout from "@/layouts/PostLayout.astro";
+import Toc from '@/components/widgets/Toc.astro';
+import { resolveUrl } from "@/utils/url";
+
+// According to Astro v5/v6, for dynamic routes in SSG mode, getStaticPaths() is required
+// to tell Astro which pages to generate at build time
+export async function getStaticPaths() {
+	const postEntries = await getCollection("post");
+	return postEntries.map((entry) => {
+		// According to Astro v5 official docs, entry.id is the unique identifier for the entry
+		// For [...slug] routes, need to convert entry.id to slug array
+		// entry.id is already the path relative to the collection root, e.g. "dir/index" or "dir"
+		// Note: For [...slug] routes, params.slug should be a string, Astro will handle it automatically
+		const slugString = entry.id;
+		return {
+			params: { slug: slugString },
+			props: { entry },
+		};
+	});
+}
+
+// Use [...slug] route to handle paths containing slashes (officially recommended)
+// slug parameter is in array format, need to convert to string to match entry.id
+const { slug } = Astro.params;
+const slugString = Array.isArray(slug) ? slug.join('/') : (slug || '');
+
+// Get entry from props (passed via getStaticPaths in SSG mode)
+const { entry } = Astro.props;
+
+// If post not found, return 404
+if (!entry) {
+	return Astro.redirect("/404");
+}
+
+const { Content, headings } = await render(entry);
+const filtered = headings.filter(h => h.depth <= 2);
+---
+
+<PostLayout title={entry.data.title} description={entry.data.description}>
+	<!-- Reading progress bar -->
+	<div id="reading-progress" class="reading-progress" style="transform: scaleX(0);"></div>
+
+	<div class="post article">
+		<main class="relative site-container mx-auto my-8 md:my-12">
+			<!-- Article header -->
+			<header class="article-header">
+				<!-- Tags -->
+				<div class="article-tags">
+					{entry.data.tags && entry.data.tags.length > 0 ? (
+						entry.data.tags.map(tag => (
+							<span class="article-tag letter-spacing-wide text-xs">{tag}</span>
+						))
+					) : (
+						<span class="article-tag text-xs">Article</span>
+					)}
+				</div>
+
+				<!-- Title -->
+				<h1 class="article-title font-brand" set:html={entry.data.title}></h1>
+
+				<!-- Metadata -->
+				<div class="article-meta text-sm text-neutral-500 dark:text-neutral-400">
+					<time datetime={entry.data.publishDate.toISOString()}>
+						{entry.data.publishDate.toLocaleDateString('en-US', {
+							year: 'numeric',
+							month: 'long',
+							day: 'numeric'
+						})}
+					</time>
+					{entry.data.read && (
+						<>
+							<span class="article-meta-divider"></span>
+							<span>{entry.data.read} min read</span>
+						</>
+					)}
+				</div>
+			</header>
+
+			<!-- Content area -->
+			<div class="relative flex flex-col lg:flex-row gap-8 lg:gap-12 xl:gap-16">
+				<!-- Left TOC - Fixed on desktop -->
+				<aside class="relative hidden lg:block lg:w-40 xl:w-50 flex-shrink-0">
+					<div class="toc-sticky-wrapper">
+						<Toc headings={filtered} />
+					</div>
+				</aside>
+
+				<!-- Article content -->
+				<div class="relative flex-1 min-w-0 w-full lg:max-w-none">
+					<article class="article-wrapper">
+						<div class="article-content">
+							<Content />
+						</div>
+					</article>
+				</div>
+			</div>
+		</main>
+	</div>
+</PostLayout>
+
+<style>
+.toc-sticky-wrapper {
+  position: sticky;
+  top: 8rem;
+}
+
+/* Hide <br/> tags in title on mobile to avoid displaying as text */
+@media (max-width: 768px) {
+  .article-title br {
+    display: none;
+  }
+}
+</style>
+
+<script>
+// Reading progress bar
+function updateReadingProgress() {
+  const progressBar = document.getElementById('reading-progress');
+  if (!progressBar) return;
+
+  const windowHeight = window.innerHeight;
+  const documentHeight = document.documentElement.scrollHeight;
+  const scrollTop = window.scrollY;
+  const scrollPercentage = (scrollTop / (documentHeight - windowHeight)) * 100;
+
+  progressBar.style.transform = `scaleX(${Math.min(scrollPercentage / 100, 1)})`;
+}
+
+// Event listener
+window.addEventListener('scroll', updateReadingProgress, { passive: true });
+
+// Initialize
+document.addEventListener('DOMContentLoaded', updateReadingProgress);
+updateReadingProgress();
+
+// Copy code button functionality
+document.addEventListener('DOMContentLoaded', function() {
+  const codeBlocks = document.querySelectorAll('.article-content pre');
+  
+  codeBlocks.forEach((pre) => {
+    // Skip if button already exists
+    if (pre.querySelector('.copy-code-button')) return;
+    
+    const code = pre.querySelector('code');
+    if (!code) return;
+    
+    // Create copy button
+    const button = document.createElement('button');
+    button.className = 'copy-code-button';
+    button.setAttribute('aria-label', 'Copy code');
+    button.innerHTML = `
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+      </svg>
+      <span class="copy-text">Copy</span>
+    `;
+    
+    // Get code text
+    const getCodeText = () => {
+      return code.textContent || code.innerText || '';
+    };
+    
+    // Copy to clipboard
+    button.addEventListener('click', async () => {
+      const codeText = getCodeText();
+      
+      try {
+        await navigator.clipboard.writeText(codeText);
+        
+        // Update button state
+        const copyText = button.querySelector('.copy-text');
+        if (!copyText) return;
+        const originalText = copyText.textContent;
+        copyText.textContent = 'Copied!';
+        button.classList.add('copied');
+        
+        // Reset after 2 seconds
+        setTimeout(() => {
+          if (copyText) {
+            copyText.textContent = originalText;
+          }
+          button.classList.remove('copied');
+        }, 2000);
+      } catch (err) {
+        // Fallback for older browsers
+        const textArea = document.createElement('textarea');
+        textArea.value = codeText;
+        textArea.style.position = 'fixed';
+        textArea.style.opacity = '0';
+        document.body.appendChild(textArea);
+        textArea.select();
+        
+        try {
+          document.execCommand('copy');
+          const copyText = button.querySelector('.copy-text');
+          if (!copyText) return;
+          const originalText = copyText.textContent;
+          copyText.textContent = 'Copied!';
+          button.classList.add('copied');
+          
+          setTimeout(() => {
+            if (copyText) {
+              copyText.textContent = originalText;
+            }
+            button.classList.remove('copied');
+          }, 2000);
+        } catch (fallbackErr) {
+          console.error('Copy failed:', fallbackErr);
+        }
+        
+        document.body.removeChild(textArea);
+      }
+    });
+    
+    pre.appendChild(button);
+  });
+});
+</script>
+

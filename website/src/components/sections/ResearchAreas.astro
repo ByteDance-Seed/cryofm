@@ -1,0 +1,121 @@
+---
+import SectionHeader from "@/components/elements/SectionHeader.astro";
+
+interface Props {
+  title?: string;
+  description?: string;
+}
+
+const { title = "Research Areas ↓", description } = Astro.props;
+
+const researchAreas = [
+{
+    title: "Cryo-EM Foundation Models",
+    description: "General-purpose density models for representation and generation.",
+  },
+  {
+    title: "Generative Density Modeling",
+    description: "Diffusion and flow-based modeling in 3D density space.",
+  },
+  {
+    title: "Inverse Problems in Cryo-EM",
+    description: "Physics-aware learning for ill-posed reconstruction tasks.",
+  },
+  {
+    title: "Structural Heterogeneity",
+    description: "Learning continuous conformational landscapes from cryo-EM data.",
+  },
+  {
+    title: "Structure–Density Coupling",
+    description: "Joint reasoning across atomic models and densities.",
+  },
+  {
+    title: "Scalable Cryo-EM AI Systems",
+    description: "Data, benchmarks, and open model ecosystems.",
+  },
+];
+---
+
+<section class="py-4 sm:py-6 md:py-8 md:pb-6 site-container">
+  <div class="space-y-6 sm:space-y-8 md:space-y-8">
+    <SectionHeader title={title} description={description} />
+  </div>
+
+  <div class="research-areas-content w-full relative mt-6 sm:mt-8">
+    <div class="research-areas-grid w-full grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-5 md:gap-6">
+      {researchAreas.map((area, index) => (
+        <div
+          class="research-area-card bg-bg-secondary/75 dark:bg-bg-secondary-dark relative overflow-hidden rounded-xl border border-primary/15 dark:border-neutral-700/50 p-5 sm:p-6 md:p-7"
+          data-aos="fade-up-sm"
+          data-aos-delay={100 + index * 100}
+          data-aos-duration="600"
+          data-aos-once="true"
+        >
+          <h3 class="research-area-title text-xl sm:text-2xl md:text-2xl font-brand mb-4 sm:mb-5 md:mb-6 leading-tight">
+            {area.title}
+          </h3>
+          <p class="research-area-description body-text">
+            {area.description}
+          </p>
+        </div>
+      ))}
+    </div>
+  </div>
+</section>
+
+<style>
+  .research-area-card {
+    min-height: 140px;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-start;
+  }
+
+  @media (min-width: 640px) {
+    .research-area-card {
+      min-height: 160px;
+    }
+  }
+
+  @media (min-width: 768px) {
+    .research-area-card {
+      min-height: 180px;
+    }
+  }
+
+  .research-area-title {
+    color: var(--color-text-primary);
+    font-weight: 500;
+  }
+
+  html.dark .research-area-title {
+    color: var(--color-text-primary-dark);
+  }
+
+  .research-area-description {
+    line-height: 1.6;
+  }
+
+  .research-area-card {
+    transition: all 0.3s ease;
+  }
+
+  .research-area-card:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 8px 24px rgba(80, 109, 149, 0.15);
+    border-color: rgba(80, 109, 149, 0.3);
+  }
+
+  html.dark .research-area-card:hover {
+    box-shadow: 0 8px 24px rgba(157, 176, 197, 0.2);
+    border-color: rgba(157, 176, 197, 0.4);
+  }
+
+  .research-area-card:hover .research-area-title {
+    color: var(--color-text-primary);
+  }
+
+  html.dark .research-area-card:hover .research-area-title {
+    color: var(--color-text-primary-dark);
+  }
+</style>

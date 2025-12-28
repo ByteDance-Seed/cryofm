@@ -1,0 +1,6 @@
+# robots.txt for ByteDance AI4Science CryoEM Lab
+# This file tells search engines which pages they can or cannot access
+
+# Allow all search engines to crawl the entire site
+User-agent: *
+Allow: /

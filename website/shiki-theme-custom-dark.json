@@ -1,0 +1,88 @@
+{
+  "$schema": "https://raw.githubusercontent.com/shikijs/shiki/main/packages/shiki/themes/schema.json",
+  "name": "custom-dark",
+  "type": "dark",
+  "colors": {
+    "editor.background": "#0d1117",
+    "editor.foreground": "#c9d1d9"
+  },
+  "tokenColors": [
+    {
+      "name": "Comment",
+      "scope": ["comment", "punctuation.definition.comment"],
+      "settings": {
+        "foreground": "#8b949e"
+      }
+    },
+    {
+      "name": "Keyword",
+      "scope": ["keyword", "storage.type", "storage.modifier"],
+      "settings": {
+        "foreground": "#ff7b72"
+      }
+    },
+    {
+      "name": "String - All string types (prioritize bright color for BibTeX values)",
+      "scope": [
+        "string",
+        "string.quoted",
+        "string.quoted.double",
+        "string.quoted.single",
+        "string.unquoted",
+        "meta.string string",
+        "string.other",
+        "string.interpolated"
+      ],
+      "settings": {
+        "foreground": "#e2e8f0"
+      }
+    },
+    {
+      "name": "Variable",
+      "scope": ["variable", "variable.other"],
+      "settings": {
+        "foreground": "#ffa657"
+      }
+    },
+    {
+      "name": "Entity name - BibTeX field names",
+      "scope": [
+        "entity.name",
+        "entity.name.tag",
+        "entity.name.function",
+        "support.function"
+      ],
+      "settings": {
+        "foreground": "#79c0ff"
+      }
+    },
+    {
+      "name": "Constant",
+      "scope": ["constant", "constant.numeric", "constant.language"],
+      "settings": {
+        "foreground": "#79c0ff"
+      }
+    },
+    {
+      "name": "Punctuation",
+      "scope": ["punctuation", "punctuation.definition", "punctuation.separator"],
+      "settings": {
+        "foreground": "#c9d1d9"
+      }
+    },
+    {
+      "name": "Bracket",
+      "scope": ["punctuation.section.brackets", "punctuation.section.braces"],
+      "settings": {
+        "foreground": "#c9d1d9"
+      }
+    },
+    {
+      "name": "Default text - ensure all text is visible",
+      "scope": ["source", "text"],
+      "settings": {
+        "foreground": "#e2e8f0"
+      }
+    }
+  ]
+}

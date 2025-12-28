@@ -1,0 +1,132 @@
+---
+import { getCollection } from "astro:content";
+import Pagination from "@/components/widgets/Pagination.astro";
+import BlogCard from "@/components/cards/BlogCard.astro";
+import SectionHeader from "@/components/elements/SectionHeader.astro";
+import Button from "@/components/ui/Button.astro";
+import AnimatedText from "@/components/ui/AnimatedText.astro";
+import { resolveUrl } from "@/utils/url";
+// Define component props
+const {
+  title = "Latest Articles",
+  description = "",
+  limit = 3,
+  listPage = false,
+  showViewAllButton = true,
+  pagination = {
+    enable: false,
+    currentPage: 1
+  },
+  postsPerPage = 3
+} = Astro.props;
+
+// Get blog post collection
+const allPosts = await getCollection("post");
+
+// Sort posts by publish date
+let posts = allPosts.sort(
+  (a, b) => b.data.publishDate.valueOf() - a.data.publishDate.valueOf()
+);
+
+// Find featured post
+const featuredPost = posts.find((post) => post.data.featured);
+
+// Note: Featured post will be displayed both at the top and in the main list, so no need to remove it from the main list
+
+// Calculate total pages
+const totalPages = Math.ceil(posts.length / postsPerPage);
+
+// If pagination is enabled, only show posts for the current page
+if (pagination.enable) {
+  const indexOfLastPost = pagination.currentPage * postsPerPage;
+  const indexOfFirstPost = indexOfLastPost - postsPerPage;
+  posts = posts.slice(indexOfFirstPost, indexOfLastPost);
+} else if (!listPage) {
+  // If not a list page, limit the number of posts displayed
+  posts = posts.slice(0, limit);
+}
+
+// Add link property to each post - create new object instead of modifying the original
+const postsWithLinks = posts.map(post => {
+  // According to Astro v5 official docs, entry.id is the unique identifier for the entry
+  // Directly use entry.id to generate URL, for [...slug] routes, id is already the correct path
+  const link = resolveUrl(`/blog/${post.id}`);
+  return {
+    ...post,
+    data: {
+      ...post.data,
+      link
+    }
+  };
+});
+
+// Create a version with link for the featured post
+const featuredPostWithLink = featuredPost ? {
+  ...featuredPost,
+  data: {
+    ...featuredPost.data,
+    link: resolveUrl(`/blog/${featuredPost.id}`)
+  }
+} : null;
+---
+
+{/* Featured post section - only shown on the first page of list page */}
+{listPage && featuredPostWithLink && pagination.currentPage === 1 && (
+  <section class="mb-16">
+    <div class="site-container">
+      <h2 class="text-3xl font-brand mb-6 text-neutral-800 dark:text-white">
+            <AnimatedText delay={0.75} stagger={0.08} content="Featured" />
+      </h2>
+      <div class=" dark:from-neutral-900 dark:to-neutral-800 p-1 rounded-2xl ">
+        <BlogCard
+          layout="horizontal"
+          content={{ ...featuredPostWithLink.data, ...featuredPostWithLink }}
+          data-aos="fade-up-sm"
+          data-aos-delay="1000"
+        />
+      </div>
+    </div>
+  </section>
+)}
+
+<section class="py-4 sm:py-6 md:py-8 md:pb-3">
+  <div class={`site-container ${!listPage ? 'space-y-10 md:space-y-16' : ''}`}>
+    {!listPage && title && (
+      <SectionHeader title={title}  description={description}/>
+    )}
+
+    {/* List page title */}
+    {listPage && title && (
+      <div class="mx-auto">
+        <h2 class="text-3xl font-brand mb-6 text-neutral-800 dark:text-white">
+          <AnimatedText delay={0.3} stagger={0.05} content={title} />
+        </h2>
+      </div>
+    )}
+
+    <div class="grid gap-x-6 gap-y-10 md:grid-cols-2 xl:grid-cols-3">
+      {postsWithLinks && postsWithLinks.map((post, index) => (
+        <BlogCard
+          content={{ ...post.data, ...post }}
+          data-aos={Math.floor(index / 3) % 2 === 0 ? "fade-right-sm" : "fade-left-sm"}
+          data-aos-delay={pagination.enable ? (400 + (index % 3) * 100) : ((index % 3) + 1) * 200}
+        />
+      ))}
+    </div>
+
+    {listPage && totalPages > 1 && (
+      <Pagination
+        collection="blog"
+        currentPage={pagination.currentPage || 1}
+        totalPages={totalPages}
+      />
+    )}
+  </div>
+
+  {/* "View All Articles" button - only shown on non-list pages when enabled */}
+  {!listPage && showViewAllButton && (
+    <div class="flex justify-center mt-8 mb-4">
+      <Button url={resolveUrl("/blog")} className="w-full max-w-60">View All Articles</Button>
+    </div>
+  )}
+</section>

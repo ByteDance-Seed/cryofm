@@ -1,0 +1,281 @@
+/* Import Google Fonts */
+@import url("https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500;1,600;1,700&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500;1,600;1,700&display=swap");
+
+
+@import "tailwindcss";
+
+/* Path relative to current CSS file */
+@config "../../tailwind.config.mjs";
+
+
+/* Define theme font mappings */
+@theme {
+  --font-brand: "Lora", ui-serif, Georgia, "Times New Roman", serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, Noto Sans SC, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+  --font-body: "IBM Plex Sans", ui-sans-serif, system-ui, Noto Sans SC, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+  --max-screen: 1200px;
+  --inner-screen: 800px;
+
+  --color-neutral-50: #f7f9fc;
+  --color-neutral-100: #edf1f8;
+  --color-neutral-200: #dfe4ed;
+  --color-neutral-300: #c5cedb;
+  --color-neutral-400: #92a1b7;
+  --color-neutral-500: #677487;
+  --color-neutral-600: #4f5a6d;
+  --color-neutral-700: #3f4a5a;
+  --color-neutral-800: #2c3542;
+  --color-neutral-900: #19222f;
+  --color-neutral-950: #10161f;
+
+  --color-primary: #506d95;
+  --color-primary-rgb: 80, 109, 149;
+  --color-primary-strong: #1e2c4a;
+  --color-primary-dark: #506d95;
+  --color-primary-light: #7a8fa5;
+  --color-primary-light-dark: #9db0c5;
+  --color-primary-lighter: #6a7fa5;
+  /* Article-specific variables */
+  --color-primary-bg: var(--color-bg-primary-light);
+  --color-primary-bg-light: var(--color-bg-secondary);
+
+
+  --color-btn-primary: #506d95;
+  --color-btn-primary-hover: #1e2c4a;
+  --color-btn-primary-dark: #7a8fa5;
+  --color-btn-primary-dark-hover: #9db0c5;
+
+  /* Accent colors */
+  --color-accent: #fad13b;
+  --color-accent-light: #faeb75;
+
+  /* Background colors */
+
+  --color-bg-primary: #fdfaf5;
+  --color-bg-secondary: #fff;
+  --color-bg-primary-light: #faf9f5;
+  --color-bg-primary-deep: #fefcf4;
+
+  --color-bg-primary-dark: #0b1220;
+  --color-bg-secondary-dark: #0f1b2d;
+
+
+  /* Text colors */
+  --color-text-primary: #506d95;
+  --color-text-secondary: #3f4a5a;
+  --color-text-tertiary: #7a6550;
+
+  --color-text-primary-dark: #9db0c5;
+  --color-text-secondary-dark: #c5cedb;
+  --color-text-tertiary-dark: #9bb3d7;
+}
+
+/* Dark mode variable overrides */
+html.dark {
+  --color-primary-rgb: 157, 176, 197;
+  --color-primary-light-dark: #9db0c5;
+  --color-primary-lighter: #adc0d5;
+  --color-primary-bg: rgba(157, 176, 197, 0.12);
+  --color-primary-bg-light: rgba(157, 176, 197, 0.06);
+}
+
+/* Add typography styles */
+@layer components {
+  .font-brand{
+    font-weight: 400!important;
+  }
+  .prose {
+    max-width: 65ch;
+  }
+  .prose img {
+    border-radius: 30px;
+  }
+  .container{
+    max-width: var(--max-screen);
+    margin-left: auto;
+    margin-right: auto;
+    padding-left: 1rem;
+    padding-right: 1rem;
+  }
+  .site-container {
+    max-width: var(--max-screen);
+    margin-left: auto;
+    margin-right: auto;
+    padding-left: 1rem;
+    padding-right: 1rem;
+  }
+  .inner-container {
+    max-width: var(--inner-screen);
+    margin-left: auto;
+    margin-right: auto;
+    padding-left: 1rem;
+    padding-right: 1rem;
+  }
+  .gradient-title {
+    background: linear-gradient(to right, #746aff, #0b046d);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+ .gradient-title-light{
+    background: linear-gradient(to right, #bcb7ff, #746aff);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  /* Unified body text style for normal paragraphs across pages */
+  .body-text {
+    font-size: 1rem;
+    line-height: 1.8;
+    color: var(--color-text-secondary);
+  }
+}
+
+html.dark .body-text {
+  color: var(--color-text-secondary-dark);
+}
+html,body{
+  color: var(--color-text-secondary);
+}
+html.dark,html.dark body{
+  color: var(--color-text-secondary-dark);
+}
+h1,h2,h3{
+  color:var(--color-text-primary);
+}
+html.dark h1,html.dark h2,html.dark h3{
+  color:var(--color-text-primary-dark);
+}
+
+/* Custom CSS styles */
+#sun {
+  transform: rotate(0);
+}
+
+#moon {
+  transform: rotate(0);
+}
+
+#darkToggle:hover #sun {
+  transform: rotate(360deg);
+}
+
+#darkToggle:hover #moon {
+   transform: rotate(45deg);
+}
+
+
+html.dark #darkToggle:hover .horizon {
+  border-color: #718096 !important;
+}
+
+html{
+  font-family: var(--font-sans);
+  scroll-behavior: smooth;
+}
+html.dark {
+  color-scheme: dark;
+}
+
+.horizon .setting {
+  animation: 1s ease 0s 1 setting;
+}
+
+.horizon .rising {
+  animation: 1s ease 0s 1 rising;
+}
+
+@keyframes setting {
+  0% {
+    transform: translate3d(0, 10px, 0);
+  }
+
+  40% {
+    transform: translate3d(0, -2px, 0);
+  }
+
+  to {
+    transform: translate3d(0, 30px, 0);
+  }
+}
+
+@keyframes rising {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 30px, 0);
+  }
+
+  40% {
+    opacity: 1;
+    transform: translate3d(0, -2px, 0);
+  }
+
+  to {
+    opacity: 1;
+    transform: translate3d(0, 10px, 0);
+  }
+}
+
+
+
+
+html::-webkit-scrollbar,
+body::-webkit-scrollbar,
+div::-webkit-scrollbar {
+  width: 6px !important;
+}
+
+html::-webkit-scrollbar-track,
+body::-webkit-scrollbar-track,
+div::-webkit-scrollbar-track {
+  background: var(--color-neutral-200) !important;
+  border-radius: 6px !important;
+  -webkit-border-radius: 6px !important;
+  -moz-border-radius: 6px !important;
+  -ms-border-radius: 6px !important;
+  -o-border-radius: 6px !important;
+}
+
+html::-webkit-scrollbar-thumb,
+body::-webkit-scrollbar-thumb,
+div::-webkit-scrollbar-thumb {
+  background: var(--color-primary-light) !important;
+  border-radius: 6px !important;
+}
+
+html::-webkit-scrollbar-thumb:hover,
+body::-webkit-scrollbar-thumb:hover,
+div::-webkit-scrollbar-thumb:hover {
+  background: var(--color-primary) !important;
+}
+
+html::-webkit-scrollbar-thumb:active,
+body::-webkit-scrollbar-thumb:active,
+div::-webkit-scrollbar-thumb:active {
+  background: var(--color-primary-dark) !important;
+}
+
+/* Global text selection styles */
+::selection {
+  background: var(--color-primary);
+  color: #ffffff;
+}
+
+html.dark ::selection {
+  background: var(--color-primary-light-dark);
+  color: var(--color-bg-primary-dark);
+}
+
+*::selection {
+  background: var(--color-primary);
+  color: #ffffff;
+}
+
+html.dark *::selection {
+  background: var(--color-primary-light-dark);
+  color: var(--color-bg-primary-dark);
+}
+
+

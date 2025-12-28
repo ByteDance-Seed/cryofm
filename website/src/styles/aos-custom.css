@@ -1,0 +1,205 @@
+/**
+ * Custom AOS Animations - Small Variants
+ * All fade animation sm variants (smaller movement distance, more subtle)
+ */
+
+/* fade-up-sm: fade in from below 30px (original 100px) */
+[data-aos="fade-up-sm"] {
+  transform: translateY(30px);
+  opacity: 0;
+  transition-property: transform, opacity;
+}
+
+[data-aos="fade-up-sm"].aos-animate {
+  transform: translateY(0);
+  opacity: 1;
+}
+
+/* fade-down-sm: fade in from above 30px */
+[data-aos="fade-down-sm"] {
+  transform: translateY(-30px);
+  opacity: 0;
+  transition-property: transform, opacity;
+}
+
+[data-aos="fade-down-sm"].aos-animate {
+  transform: translateY(0);
+  opacity: 1;
+}
+
+/* fade-left-sm: slide in from right 30px */
+[data-aos="fade-left-sm"] {
+  transform: translateX(30px);
+  opacity: 0;
+  transition-property: transform, opacity;
+}
+
+[data-aos="fade-left-sm"].aos-animate {
+  transform: translateX(0);
+  opacity: 1;
+}
+
+/* fade-right-sm: slide in from left 30px */
+[data-aos="fade-right-sm"] {
+  transform: translateX(-30px);
+  opacity: 0;
+  transition-property: transform, opacity;
+}
+
+[data-aos="fade-right-sm"].aos-animate {
+  transform: translateX(0);
+  opacity: 1;
+}
+
+/* fade-up-right-sm: slide in diagonally from bottom-left 30px */
+[data-aos="fade-up-right-sm"] {
+  transform: translate(-30px, 30px);
+  opacity: 0;
+  transition-property: transform, opacity;
+}
+
+[data-aos="fade-up-right-sm"].aos-animate {
+  transform: translate(0, 0);
+  opacity: 1;
+}
+
+/* fade-up-left-sm: slide in diagonally from bottom-right 30px */
+[data-aos="fade-up-left-sm"] {
+  transform: translate(30px, 30px);
+  opacity: 0;
+  transition-property: transform, opacity;
+}
+
+[data-aos="fade-up-left-sm"].aos-animate {
+  transform: translate(0, 0);
+  opacity: 1;
+}
+
+/* fade-down-right-sm: slide in diagonally from top-left 30px */
+[data-aos="fade-down-right-sm"] {
+  transform: translate(-30px, -30px);
+  opacity: 0;
+  transition-property: transform, opacity;
+}
+
+[data-aos="fade-down-right-sm"].aos-animate {
+  transform: translate(0, 0);
+  opacity: 1;
+}
+
+/* fade-down-left-sm: slide in diagonally from top-right 30px */
+[data-aos="fade-down-left-sm"] {
+  transform: translate(30px, -30px);
+  opacity: 0;
+  transition-property: transform, opacity;
+}
+
+[data-aos="fade-down-left-sm"].aos-animate {
+  transform: translate(0, 0);
+  opacity: 1;
+}
+
+/*
+ * Additional: xs variant (more subtle animation, 15px)
+ */
+
+/* fade-up-xs: fade in from below 15px */
+[data-aos="fade-up-xs"] {
+  transform: translateY(15px);
+  opacity: 0;
+  transition-property: transform, opacity;
+}
+
+[data-aos="fade-up-xs"].aos-animate {
+  transform: translateY(0);
+  opacity: 1;
+}
+
+/* fade-down-xs: fade in from above 15px */
+[data-aos="fade-down-xs"] {
+  transform: translateY(-15px);
+  opacity: 0;
+  transition-property: transform, opacity;
+}
+
+[data-aos="fade-down-xs"].aos-animate {
+  transform: translateY(0);
+  opacity: 1;
+}
+
+/* fade-left-xs: slide in from right 15px */
+[data-aos="fade-left-xs"] {
+  transform: translateX(15px);
+  opacity: 0;
+  transition-property: transform, opacity;
+}
+
+[data-aos="fade-left-xs"].aos-animate {
+  transform: translateX(0);
+  opacity: 1;
+}
+
+/* fade-right-xs: slide in from left 15px */
+[data-aos="fade-right-xs"] {
+  transform: translateX(-15px);
+  opacity: 0;
+  transition-property: transform, opacity;
+}
+
+[data-aos="fade-right-xs"].aos-animate {
+  transform: translateX(0);
+  opacity: 1;
+}
+
+/*
+ * Optional: lg variant (larger movement distance, 150px)
+ */
+
+/* fade-up-lg: fade in from below 150px */
+[data-aos="fade-up-lg"] {
+  transform: translateY(150px);
+  opacity: 0;
+  transition-property: transform, opacity;
+}
+
+[data-aos="fade-up-lg"].aos-animate {
+  transform: translateY(0);
+  opacity: 1;
+}
+
+/* fade-down-lg: fade in from above 150px */
+[data-aos="fade-down-lg"] {
+  transform: translateY(-150px);
+  opacity: 0;
+  transition-property: transform, opacity;
+}
+
+[data-aos="fade-down-lg"].aos-animate {
+  transform: translateY(0);
+  opacity: 1;
+}
+
+/* fade-left-lg: slide in from right 150px */
+[data-aos="fade-left-lg"] {
+  transform: translateX(150px);
+  opacity: 0;
+  transition-property: transform, opacity;
+}
+
+[data-aos="fade-left-lg"].aos-animate {
+  transform: translateX(0);
+  opacity: 1;
+}
+
+/* fade-right-lg: slide in from left 150px */
+[data-aos="fade-right-lg"] {
+  transform: translateX(-150px);
+  opacity: 0;
+  transition-property: transform, opacity;
+}
+
+[data-aos="fade-right-lg"].aos-animate {
+  transform: translateX(0);
+  opacity: 1;
+}
+

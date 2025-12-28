@@ -1,0 +1,75 @@
+site_name: "CryoFM: Foundation Model for Cryo-EM"
+site_description: CryoFM Foundation Model for Cryo-EM User Guide
+site_author: ByteDance Seed Team
+site_url: https://bytedance-seed.github.io/cryofm/docs/
+use_directory_urls: false
+
+theme:
+  name: material
+  icon:
+    logo: material/microscope
+  font:
+    text: IBM Plex Sans
+    code: IBM Plex Mono
+  language: en
+  palette:
+    # Light mode
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    # Dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    # - navigation.tabs
+    - navigation.top
+    - navigation.sections
+    - navigation.expand
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+
+nav:
+  - Home: index.md
+  - Quick Start:
+      - getting-started/installation.md
+      # - getting-started/quick-start.md
+      # - getting-started/examples.md
+  - Model Guides:
+      - model-guides/cryofm2.md
+      - model-guides/cryofm1.md
+  - How-to Guides:
+      - how-to/working-with-emdb.md
+  # - API Reference:
+  #     - api-reference/commands.md
+  # - Integration Guide:
+  #     - integration/relion.md
+  - Trouble shooting:
+      - troubleshooting/common-issues.md
+
+copyright: Copyright &copy; 2025 <a href="https://seed.bytedance.com/en/direction/ai_for_science">ByteDance Seed AI4Science Team</a>
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - admonition
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - attr_list
+  - md_in_html
+
+plugins:
+  - search

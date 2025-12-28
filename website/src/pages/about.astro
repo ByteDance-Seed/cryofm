@@ -1,0 +1,257 @@
+---
+import {
+	ArrowUpRight,
+	Code,
+	Globe,
+	Mail,
+	Monitor,
+	Palette,
+	Smartphone,
+	Zap,
+} from "@lucide/astro";
+import { siteConfig } from "@/config/site.js";
+import social from "@/collections/social.json";
+import Button from "@/components/ui/Button.astro";
+import Layout from "@/layouts/Layout.astro";
+import Toc from "@/components/widgets/Toc.astro";
+import Matter from "@/components/ui/Matter.astro";
+import { resolveUrl } from "@/utils/url";
+
+// Manually define page table of contents structure
+const headings = [
+  { depth: 2, slug: "about", text: "About" },
+  // { depth: 2, slug: "tool-stack", text: "Tool Stack" },
+  { depth: 2, slug: "contact", text: "Contact" },
+];
+
+const filtered = headings.filter(h => h.depth <= 3);
+---
+
+<Layout title="About">
+  <!-- Mobile TOC -->
+  <div class="block lg:hidden px-7 pt-6">
+    <Toc headings={filtered} />
+  </div>
+
+  <!-- Main container -->
+  <div class="relative site-container  mx-auto my-8">
+    <div class="flex flex-col lg:flex-row gap-8 lg:gap-12 xl:gap-16">
+      <!-- Left TOC - Fixed on desktop -->
+      <aside class="relative hidden lg:block lg:w-40 xl:w-50 flex-shrink-0">
+          <div class="toc-sticky-wrapper">
+            <Toc headings={filtered} />
+          </div>
+      </aside>
+
+      <!-- Right main content - Adaptive width -->
+      <main class="relative flex-1 min-w-0 w-full lg:max-w-none">
+        <div
+          class="w-full"
+          data-aos="fade-up-xs"
+          data-aos-duration="500"
+          data-aos-once="true"
+        >
+            <h2
+              id="about"
+              class="text-2xl font-brand tracking-tight  sm:text-3xl lg:text-4xl"
+            >
+             About
+            </h2>
+            <div class="w-full border-b-1 border-dashed border-b-gray-200 dark:border-b-neutral-700 mt-4 mb-8"></div>
+        </div>
+
+        <h1
+          class="text-2xl font-brand tracking-tight mb-6 text-neutral-800 dark:text-neutral-100 sm:text-3xl lg:text-4xl"
+          data-aos="fade-up-xs"
+          data-aos-delay="100"
+          data-aos-duration="500"
+          data-aos-once="true"
+        >
+          🔬 AI for CryoEM
+        </h1>
+
+        <p
+          class="text-3xl mt-2 mb-6 font-brand italic text-left text-primary-strong dark:text-primary-light"
+          data-aos="fade-up-xs"
+          data-aos-delay="200"
+          data-aos-duration="500"
+          data-aos-once="true"
+        >"Advancing cryo-electron microscopy through artificial intelligence and computational methods."</p>
+
+        <p
+          class="body-text pb-4"
+          data-aos="fade-up-xs"
+          data-aos-delay="300"
+          data-aos-duration="500"
+          data-aos-once="true"
+        >
+          We are the AI for CryoEM research division within the ByteDance Seed AI4Science team. 
+          Our mission is to advance cryo-electron microscopy by leveraging artificial intelligence and state-of-the-art computational methods. 
+          Our research focuses on cutting-edge directions such as heterogeneity analysis via generative machine learning methods, the development of foundation models for CryoEM density maps, and their broad applications. 
+          We also develop powerful tools and algorithms for structural biology.
+        </p>
+
+        <div
+          class="mt-8 mb-6"
+          data-aos="fade-up-xs"
+          data-aos-delay="400"
+          data-aos-duration="500"
+          data-aos-once="true"
+        >
+          <h3 class="text-xl font-medium text-neutral-800 dark:text-neutral-100 mb-3">
+            About ByteDance Seed Team
+          </h3>
+          <p class="body-text">
+            Founded in 2023, ByteDance Seed Team is dedicated to crafting the industry's most advanced AI foundation models. 
+            The team aspires to become a world-class research team and make significant contributions to the advancement of science and society. 
+            You can get to know Bytedance Seed better through the following channels:
+          </p>
+        </div>
+
+        <div
+          class="social mt-6 mb-8"
+          data-aos="fade-up-xs"
+          data-aos-delay="500"
+          data-aos-duration="600"
+          data-aos-once="true"
+        >
+             <div class="social-list flex flex-wrap gap-2 items-center justify-start">
+                {social
+                  .map((item, index) => (
+                    <a
+                      href={item.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="social-item relative group overflow-hidden rounded-xl transition-all duration-300 hover:-translate-y-2 hover:rotate-[-6deg] hover:shadow-lg"
+                      data-aos="fade-up-xs"
+                      data-aos-delay={600 + (index * 50)}
+                      data-aos-duration="400"
+                      data-aos-once="true"
+                    >
+                      <img
+                        src={resolveUrl(item.image)}
+                        alt={item.name}
+                        class="w-[96px] h-[96px] rounded-xl object-cover transition-transform duration-300 group-hover:scale-105"
+                      />
+                      <div class="absolute bottom-[10px] left-[12px] z-10">
+                        <div class="social-name font-semibold text-[10px] text-white drop-shadow-md">
+                          {item.name}
+                        </div>
+                        <div class="social-username text-[9px] text-white/85 drop-shadow-sm">
+                          @{item.username}
+                        </div>
+                      </div>
+                    </a>
+                  ))
+                }
+             </div>
+        </div>
+
+        <div class="w-full border-b-1 border-dashed border-b-gray-200 dark:border-b-neutral-700 mt-4 mb-8"></div>
+
+        <section>
+          <h2
+            id="tool-stack"
+            class="mt-12 mb-4 text-[28px] text-neutral-800  dark:text-neutral-200 font-brand"
+            data-aos="fade-up-xs"
+            data-aos-duration="500"
+            data-aos-once="true"
+          >Tool Stack</h2>
+        <div
+          class="tool-stack-box relative bg-white border-accent/25 dark:bg-gray-900 rounded-xl overflow-hidden w-full h-[400px]"
+          data-aos="fade-up-sm"
+          data-aos-delay="100"
+          data-aos-duration="600"
+          data-aos-once="true"
+        >
+              <Matter />
+              <div class="absolute inset-0 flex items-center justify-center text-white opacity-50">
+              </div>
+          </div>
+        </section>
+
+      <section>
+        <h2
+          id="contact"
+          class="mt-12 mb-4 text-[28px] text-neutral-800  dark:text-neutral-200 font-brand"
+          data-aos="fade-up-xs"
+          data-aos-duration="500"
+          data-aos-once="true"
+        >Contact</h2>
+        <p
+          class="body-text mb-4"
+          data-aos="fade-up-xs"
+          data-aos-delay="100"
+          data-aos-duration="500"
+          data-aos-once="true"
+        >
+          If you're interested in collaborations, joining opportunities, or have any inquiries, please feel free to contact us via email. 
+          Alternatively, you can also open issue on our GitHub repositories to get involved.
+        </p>
+        
+        <div
+          class="body-text mb-4 article-content compact-spacing"
+          data-aos="fade-up-xs"
+          data-aos-delay="200"
+          data-aos-duration="500"
+          data-aos-once="true"
+        >
+          <p>
+            Our team is primarily based in Shanghai and San Jose. 
+            For those interested in joining our team:
+          </p>
+          
+          <div>
+            <h3 class="text-lg font-semibold text-neutral-800 dark:text-neutral-100 mb-2">📍 Shanghai, China</h3>
+            <p>
+              <span class="font-medium">Full-time positions:</span> Please apply via <a
+                href="https://jobs.bytedance.com/experienced/position/7394447089734633778/detail"
+                target="_blank"
+                rel="noopener noreferrer"
+              >our job posting</a>.
+            </p>
+            <p>
+              <span class="font-medium">Internship opportunities:</span> Please apply via <a
+                href="https://jobs.bytedance.com/campus/position/7472654550025963794/detail"
+                target="_blank"
+                rel="noopener noreferrer"
+              >our internship posting</a>.
+            </p>
+          </div>
+          
+          <div>
+            <h3 class="text-lg font-semibold text-neutral-800 dark:text-neutral-100 mb-2">📍 San Jose, USA</h3>
+            <p>
+              For <span class="font-medium">internship opportunities</span> in San Jose, please contact <a
+                href="mailto:yilai.li@bytedance.com"
+              >Yilai Li (San Jose)</a> or <a
+                href="mailto:zhouyi.naive@bytedance.com"
+              >Yi Zhou (Shanghai)</a>.
+            </p>
+          </div>
+        </div>
+      </section>
+      </main>
+    </div>
+  </div>
+</Layout>
+
+<style>
+.toc-sticky-wrapper {
+  position: sticky;
+  top: 8rem;
+}
+
+.compact-spacing {
+  line-height: 1.5;
+}
+
+.compact-spacing p {
+  margin: 0.8em 0;
+  line-height: 1.5;
+}
+
+.compact-spacing div {
+  margin-bottom: 0.8em;
+}
+</style>

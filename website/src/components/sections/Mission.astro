@@ -1,0 +1,229 @@
+---
+import SectionHeader from "@/components/elements/SectionHeader.astro";
+
+interface Props {
+  title?: string;
+  description?: string;
+}
+
+const { title = "Our Mission", description } = Astro.props;
+---
+
+<section class="py-4 sm:py-6 md:py-8 md:pb-6 site-container">
+  <div class="space-y-6 sm:space-y-8">
+    {title && <SectionHeader title={title} description={description} />}
+  </div>
+
+  <div class="mission-content w-full relative mt-6 sm:mt-8">
+    <div class="mission-visual horizon" aria-hidden="true" data-aos="fade-up-sm" data-aos-delay="50" data-aos-duration="600" data-aos-once="true">
+      <div class="ctf">
+        <svg class="ctf-curve" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+          <defs>
+            <linearGradient id="ctfStroke" x1="0" x2="1" y1="0" y2="0">
+              <stop offset="0" stop-color="rgba(45,109,195,.10)"></stop>
+              <stop offset="0.25" stop-color="rgba(45,109,195,.35)"></stop>
+              <stop offset="1" stop-color="rgba(45,109,195,.10)"></stop>
+            </linearGradient>
+      
+            <filter id="softGlow" x="-20%" y="-20%" width="140%" height="140%">
+              <feGaussianBlur stdDeviation="0.35" result="blur"></feGaussianBlur>
+              <feMerge>
+                <feMergeNode in="blur"></feMergeNode>
+                <feMergeNode in="SourceGraphic"></feMergeNode>
+              </feMerge>
+            </filter>
+          </defs>
+      
+          <!-- Contrast = 0 baseline -->
+          <line x1="0" y1="50" x2="100" y2="50" class="ctf-midline"></line>
+      
+          <!-- Generated curve -->
+          <path class="ctf-path" d=""></path>
+        </svg>
+      </div>
+    </div>
+    <div class="mission-text w-full">
+      <div 
+        class="mission-details body-text space-y-6"
+        data-aos="fade-up-sm"
+        data-aos-delay="100"
+        data-aos-duration="600"
+        data-aos-once="true"
+      >
+        <p class="mission-paragraph">
+          Our mission is to develop <span class="highlight-keyword">principled, generalizable, and scalable AI models</span> that address the <span class="highlight-keyword">fundamental limitations</span> of <span class="highlight-keyword">cryo-EM data analysis</span>.
+        </p>
+        <p class="mission-paragraph">
+          We believe the next generation of cryo-EM algorithms will be driven by <span class="highlight-keyword">foundation models</span>, <span class="highlight-keyword">probabilistic inference</span>, and <span class="highlight-keyword">physics-aware learning</span>, enabling robust reasoning about <span class="highlight-keyword">heterogeneity</span>, <span class="highlight-keyword">uncertainty</span>, and <span class="highlight-keyword">structure</span>.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<style>
+  .mission-content {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+  }
+
+  @media (min-width: 768px) {
+    .mission-content {
+      gap: 2rem;
+    }
+  }
+
+  .mission-visual.horizon {
+    height: 160px;
+    border-radius: 18px;
+    position: relative;
+    overflow: hidden;
+    background:
+      repeating-linear-gradient(
+        0deg,
+        rgba(45,109,195,.06) 0px,
+        rgba(45,109,195,.06) 1px,
+        transparent 1px,
+        transparent 14px
+      ),
+      radial-gradient(120% 120% at 30% 80%, rgba(45,109,195,.14), rgba(45,109,195,0) 60%),
+      linear-gradient(180deg, rgba(45,109,195,.06), rgba(45,109,195,0));
+  }
+
+  .mission-visual.horizon::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(circle at 20% 85%, rgba(45,109,195,.22), transparent 55%),
+      radial-gradient(circle at 55% 45%, rgba(45,109,195,.16), transparent 58%),
+      radial-gradient(circle at 80% 25%, rgba(45,109,195,.12), transparent 60%);
+    opacity: .9;
+  }
+
+  .ctf-curve {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 10;
+  }
+
+  html.dark .mission-visual.horizon {
+    background:
+      repeating-linear-gradient(
+        0deg,
+        rgba(157, 176, 197, .08) 0px,
+        rgba(157, 176, 197, .08) 1px,
+        transparent 1px,
+        transparent 14px
+      ),
+      radial-gradient(120% 120% at 30% 80%, rgba(157, 176, 197, .18), rgba(157, 176, 197, 0) 60%),
+      linear-gradient(180deg, rgba(157, 176, 197, .08), rgba(157, 176, 197, 0));
+  }
+
+  html.dark .mission-visual.horizon::before {
+    background:
+      radial-gradient(circle at 20% 85%, rgba(157, 176, 197, .28), transparent 55%),
+      radial-gradient(circle at 55% 45%, rgba(157, 176, 197, .2), transparent 58%),
+      radial-gradient(circle at 80% 25%, rgba(157, 176, 197, .15), transparent 60%);
+  }
+
+  html.dark .ctf-curve path {
+    stroke: rgba(157, 176, 197, .25);
+  }
+
+  .mission-text {
+    line-height: 1.8;
+  }
+
+  .mission-paragraph {
+    text-align: left;
+  }
+
+  .highlight-keyword {
+    font-weight: 600;
+    color: var(--color-text-primary);
+  }
+
+  html.dark .highlight-keyword {
+    color: var(--color-text-primary-dark);
+  }
+
+  @media (min-width: 768px) {
+    .mission-details {
+      padding: 2rem;
+      background: var(--color-bg-secondary);
+      border-radius: 1rem;
+      border: 1px solid rgba(80, 109, 149, 0.1);
+    }
+
+    html.dark .mission-details {
+      background: var(--color-bg-secondary-dark);
+      border-color: rgba(157, 176, 197, 0.15);
+    }
+  }
+
+  .ctf { width: 100%; max-width: 520px; aspect-ratio: 5 / 1; }
+  .ctf-curve { width: 100%; height: 100%; display: block; overflow: visible; }
+
+  .ctf-midline {
+    stroke: rgba(45,109,195,.10);
+    stroke-width: 1;
+    vector-effect: non-scaling-stroke;
+  }
+
+  .ctf-path {
+    fill: none;
+    stroke: url(#ctfStroke);
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    vector-effect: non-scaling-stroke;
+    filter: url(#softGlow);
+  }
+</style>
+
+<script>
+(() => {
+  const svg  = document.querySelector('.ctf-curve');
+  const path = svg?.querySelector('.ctf-path');
+
+  if (!svg || !path) return;
+
+  // x ∈ [0,1] ~ spatial frequency (low -> high)
+  const cfg = {
+    mid: 50,        // y=50 is contrast=0
+    amp: 38,        // amplitude in viewBox units
+    ramp: 0.10,     // low-freq rise speed
+    decay: 1.6,     // envelope exponential decay
+    bFactor: 1.8,   // extra Gaussian damping
+    defocus: 14.0,  // controls k^2 term (zero-crossing spacing)
+    cs: 24.0,       // controls k^4 term (higher-freq densification)
+    n: 520          // sampling resolution
+  };
+
+  const envelope = (k) => {
+    const rise  = 1 - Math.exp(-k / cfg.ramp);      // start near 0
+    const expd  = Math.exp(-cfg.decay * k);         // decay
+    const gauss = Math.exp(-cfg.bFactor * k * k);   // extra damping
+    return rise * expd * gauss;
+  };
+
+  const phase = (k) => {
+    // A CTF-like phase polynomial: ~ defocus*k^2 + cs*k^4
+    return Math.PI * (cfg.defocus * k * k + cfg.cs * Math.pow(k, 4));
+  };
+
+  let d = '';
+  for (let i = 0; i <= cfg.n; i++) {
+    const k = i / cfg.n;
+    const y = -Math.sin(phase(k));          // oscillation
+    const yy = cfg.mid + y * cfg.amp * envelope(k);
+    const xx = 100 * k;
+    d += (i === 0 ? `M ${xx.toFixed(3)} ${yy.toFixed(3)}` : ` L ${xx.toFixed(3)} ${yy.toFixed(3)}`);
+  }
+  path.setAttribute('d', d);
+})();
+</script>

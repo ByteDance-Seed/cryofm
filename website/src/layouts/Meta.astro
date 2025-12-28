@@ -1,0 +1,65 @@
+---
+import { siteConfig } from '@/config/site.js';
+
+export interface Props {
+  title?: string;
+  description?: string;
+  keywords?: string;
+  url?: string;
+  ogImage?: string;
+  twitterHandle?: string;
+}
+
+const {
+  title,
+  description,
+  keywords = "",
+  url = siteConfig.url, //
+  ogImage = "/og.jpg",
+  twitterHandle = siteConfig.social.twitterName || '',
+} = Astro.props;
+
+// Get base URL for proper path resolution with base path
+// For public/ directory files, Astro automatically handles the base path
+const baseUrl = import.meta.env.BASE_URL || '/';
+const resolveAssetPath = (path: string) => {
+  // In development (base = '/'), public files are served directly at root
+  // In production (base = '/cryofm/'), we need to add base path
+  if (baseUrl === '/') {
+    return path; // Development: use path as-is (e.g., "/assets/favicon_io/favicon.ico")
+  }
+  // Production: add base path (e.g., "/cryofm/assets/favicon_io/favicon.ico")
+  const base = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
+  return `${base}${path}`;
+};
+---
+
+<!-- Meta Tags -->
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<!-- Favicons -->
+<link rel="icon" type="image/x-icon" href={resolveAssetPath("/assets/favicon_io/favicon.ico")} />
+<link rel="icon" type="image/png" sizes="16x16" href={resolveAssetPath("/assets/favicon_io/favicon-16x16.png")} />
+<link rel="icon" type="image/png" sizes="32x32" href={resolveAssetPath("/assets/favicon_io/favicon-32x32.png")} />
+<link rel="apple-touch-icon" sizes="180x180" href={resolveAssetPath("/assets/favicon_io/apple-touch-icon.png")} />
+<link rel="manifest" href={resolveAssetPath("/assets/favicon_io/site.webmanifest")} />
+<title>{title}</title>
+<meta name="description" content={description} />
+<meta name="keywords" content={keywords} />
+<meta name="author" content={siteConfig.author} />
+
+<!-- Open Graph Tags -->
+<meta property="og:type" content="website" />
+<meta property="og:title" content={title} />
+<meta property="og:description" content={description} />
+<meta property="og:url" content={url} />
+<meta property="og:image" content={ogImage.startsWith('http') ? ogImage : resolveAssetPath(ogImage)} />
+<meta property="og:site_name" content={title} />
+
+<!-- Twitter Meta Tags -->
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content={title} />
+<meta name="twitter:description" content={description} />
+<meta name="twitter:image" content={ogImage.startsWith('http') ? ogImage : resolveAssetPath(ogImage)} />
+<meta name="twitter:site" content={twitterHandle} />
+<meta name="twitter:creator" content={twitterHandle} />

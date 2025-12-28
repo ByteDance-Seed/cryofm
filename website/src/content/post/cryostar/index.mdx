@@ -1,0 +1,233 @@
+---
+title: "CryoSTAR: Leveraging Structural Prior and Constraints for Cryo-EM Heterogeneous Reconstruction"
+publishDate: 2023-12-6
+read: 15
+description: CryoSTAR a structural regularization approach for conformational heterogeneity in cryo-EM. It has been validated on diverse experimental datasets.
+img: "/assets/blog/cryostar/cover-cryostar.jpg"
+tags:
+  - Heterogeneity Analysis
+  - Structural Constraints
+  - Elastic Network
+  - Adaptive Regularization
+  - Nature Methods
+featured: false
+---
+
+import OptimizedImage from "@/components/widgets/OptimizedImage.astro";
+
+> **TL;DR**   
+> CryoSTAR is a cryo-EM analysis tool for **resolving continuous conformational heterogeneity** directly from particle images.  
+> CryoSTAR has been validated on diverse **experimental datasets**, including large complexes, membrane proteins, and small proteins.
+
+<div class="mt-3 flex justify-center items-center gap-3 text-xs sm:text-sm md:text-base whitespace-nowrap text-neutral-700 dark:text-neutral-300 overflow-x-auto">
+  <a
+    href="https://www.nature.com/articles/s41592-024-02486-1"
+    target="_blank"
+    rel="noreferrer"
+    class="inline-flex items-center gap-1 font-medium hover:underline"
+  >
+    <span>📄</span>
+    <span>Nature Methods</span>
+  </a>
+  <span class="text-neutral-400">·</span>
+  <a
+    href="https://github.com/bytedance/cryostar"
+    target="_blank"
+    rel="noreferrer"
+    class="inline-flex items-center gap-1 font-medium hover:underline"
+  >
+    <span>💻</span>
+    <span>Code</span>
+  </a>
+  <span class="text-neutral-400">·</span>
+  <a
+    href="https://byte-research.gitbook.io/cryostar/"
+    target="_blank"
+    rel="noreferrer"
+    class="inline-flex items-center gap-1 font-medium hover:underline"
+  >
+    <span>📖</span>
+    <span>User Guides</span>
+  </a>
+</div>
+
+## What can CryoSTAR do for you?
+
+<OptimizedImage src="https://lf3-nlp-opensource.bytetos.com/obj/nlp-opensource/cryostar/images/demo.gif" class="img-medium" alt="EMPIAR-10180" formats={["webp", "avif", "gif"]} loading="lazy" />
+<small class="block article-caption">
+  Example on EMPIAR-10180.
+</small>
+
+**With CryoSTAR, you can:**
+- Reveal continuous motions that are hidden by standard 3D classification  
+- Obtain both density maps and corresponding coarse-grained structural models  
+- Assess structural hypotheses using density-based validation (FSC)  
+
+**CryoSTAR produces two complementary outputs for each conformation:**
+1. **Density maps:** Generated directly from particle images, these maps remain minimally biased
+   and serve as a reliable reference for interpretation.
+2. **Coarse-grained structural models:** Derived from an input atomic model, these models highlight conformational changes
+   in a physically interpretable manner.
+
+**Independent density validation is a design choice of CryoSTAR:**  
+Importantly, density maps and structural models are generated through separate stages,
+allowing density maps to be used to validate — rather than assume — the inferred motions.
+
+
+## What is cryoSTAR?
+
+The origin of the name “CryoSTAR“ stems from the concept of **st**ructur**a**l **r**egularization. Our method is a structural 
+constraint-based approach serving the analysis of continuous conformational heterogeneity in cryoEM.
+
+<OptimizedImage src="/assets/blog/cryostar/overview.jpg" class="img-large" alt="Framework" formats={["webp", "avif", "jpeg"]} loading="lazy" />
+<small class="block article-caption">
+  An overview of CryoSTAR.
+</small>
+
+**CryoSTAR** takes **two complementary inputs** to analyze conformational heterogeneity in cryo-EM data:
+
+1. **A cryo-EM particle dataset** of a single macromolecular complex, with particle poses and CTFs estimated by standard upstream methods.
+2. **A single static atomic model** of the target, which may come from a homogeneous reconstruction, protein structure prediction, or a known homolog from the PDB.
+
+
+### What CryoSTAR does?
+
+CryoSTAR maps each particle image into a **low-dimensional latent space** that captures structural variability.
+From the distribution of latent variables, we infer the population and organization of distinct conformations present in the dataset.
+Crucially, CryoSTAR also enables image-wise posterior inference: for each particle, we can sample its corresponding conformation from the posterior distribution.
+
+The output includes:
+
+- **Coarse-grained atomic models** representing different conformations
+- **Corresponding density maps** for structural interpretation
+
+### Appropriate structure priors matter
+
+<OptimizedImage src="/assets/blog/cryostar/interlock.jpg" class="img-large" alt="Framework" formats={["webp", "avif", "jpeg"]} loading="lazy" />
+<small class="block article-caption">
+  Proper regularization strength is the key to leveraging prior structural information.
+</small>
+
+CryoSTAR is built around **structure-aware priors**, with the central principle that effective use of structural priors requires **appropriate structural regularization**. In our framework, the structure prior serves two key roles:
+
+1. **Anchoring dynamics:** a static reference conformation provides a physically meaningful basis for modeling continuous structural variation.
+
+2. **Constraining the search space:** structure-derived constraints substantially reduce the dimensionality and ambiguity of conformational exploration.
+
+Together, these design choices allow CryoSTAR to robustly resolve heterogeneous conformations while remaining faithful to known structural information.
+
+## How CryoSTAR Works?
+
+CryoSTAR adopts a two-phase learning framework to model conformational heterogeneity in cryo-EM datasets while explicitly incorporating structural priors.
+
+### Phase 1: Structure-regularized heterogeneity analysis
+
+In the first phase, CryoSTAR learns a low-dimensional latent representation of continuous conformational variability using **a structure-regularized variational autoencoder (VAE)**.
+
+<OptimizedImage src="/assets/blog/cryostar/phase1.jpg" class="img-large" alt="Phase1" formats={["webp", "avif", "jpeg"]} loading="lazy" />
+<small class="block article-caption">
+  Phase 1: Structural regularized VAE.
+</small>
+
+Given an input particle image, the encoder infers a latent variable that parametrizes a **deformation of a reference atomic structure**.
+The reference structure is represented in a **coarse-grained form**, where each residue is modeled by a single representative atom (e.g., $C_\alpha$ for proteins), resulting in an $N$-node structure for a protein with $N$ residues.
+
+Because cryo-EM observations are projection images of density maps rather than atomic coordinates, the predicted structure is first converted into a density representation using a **Gaussian blob model**, following the standard practice in `e2gmm`. 
+The density is then projected according to the known particle pose and modulated by the contrast transfer function (CTF) to generate a predicted image. 
+Training is performed by minimizing the reconstruction loss between the predicted and observed particle images, together with a KL divergence term that regularizes the latent posterior.
+
+#### Structure-aware regularization
+
+To ensure physically meaningful conformations and to reduce the effective search space, CryoSTAR introduces **structure-aware regularization terms** that explicitly constrain how the atomic model can deform:
+
+- **Continuity constraint:** Preserves the distances between adjacent residues along each chain, maintaining backbone continuity during deformation.
+
+- **Clash avoidance:** Prevents residues from approaching each other closer than an empirical covalent bond distance, avoiding unphysical bond formation.
+
+- **Elastic network regularization:** Stabilizes local secondary structure by introducing elastic constraints between residues that are spatially close in the reference structure, effectively preserving helices and β-sheets.
+
+To mitigate reference bias introduced by elastic constraints, CryoSTAR employs an **adaptive relaxation strategy**. Elastic connections that consistently contribute large fitting errors are progressively relaxed or removed during training, allowing the model to accommodate alternative conformational states (e.g., open vs. closed forms) while retaining structural stability where supported by the data.
+
+The overall objective in Phase 1 combines standard VAE losses with these structural regularization terms, yielding a latent space that captures continuous conformational variability under physically meaningful constraints.
+
+### Phase 2: Density decoding without structural bias
+
+In the second phase, CryoSTAR focuses on producing density-based outputs for interpretation and validation.
+
+<OptimizedImage src="/assets/blog/cryostar/phase2.jpg" class="img-large" alt="Phase2" formats={["webp", "avif", "jpeg"]} loading="lazy" />
+<small class="block article-caption">
+  Phase 2: Density volume decoder.
+</small>
+
+Using the latent variables inferred for each particle image, a **density decoder** is trained to directly map latent coordinates to 3D density volumes. This decoder is trained **only on particle images**, without structural priors or regularization, thereby minimizing reference bias in the resulting density maps.
+
+The generated density maps serve two purposes:
+
+1. They provide an intuitive, cryo-EM native representation of the inferred conformations.
+2. They enable cross-validation of the coarse-grained atomic models obtained in Phase 1.
+
+### Exploring the conformational landscape
+
+After training, the two decoders can be jointly used to sample **both coarse-grained atomic structures and corresponding density maps** from any region of the latent space associated with the particle dataset.
+Users may explore this space using standard tools such as PCA, clustering, or other unsupervised analyses to identify dominant conformational states and their populations.
+
+<OptimizedImage src="/assets/blog/cryostar/after_train.jpg" class="img-medium" alt="AfterTrain" formats={["webp", "avif", "jpeg"]} loading="lazy" />
+<small class="block article-caption">
+  After training results.
+</small>
+
+## What CryoSTAR Reveals?
+
+### The pre-catalytic spliceosome
+
+The pre-catalytic spliceosome is a large protein-RNA complex containing more than 10,000 residues. This dataset (EMPIAR-10180) is commonly used as a benchmark for testing continuous heterogeneity algorithms.
+
+<video src="https://lf3-nlp-opensource.bytetos.com/obj/nlp-opensource/cryostar/videos/EMPIAR-10180.mp4" class="img-large" controls autoplay loop muted playsinline></video>
+<small class="block article-caption">
+  CryoSTAR results on EMPIAR-10180.
+</small>
+
+### The U4/U6.U5 tri-snRNP
+
+The U4/U6.U5 tri-snRNP is a considerable part of the spliceosome. This dataset (EMPIAR-10073) is known to have flexible regions especially in the head and arm parts.
+
+<video src="https://lf3-nlp-opensource.bytetos.com/obj/nlp-opensource/cryostar/videos/EMPIAR-10073.mp4" class="img-large" controls autoplay loop muted playsinline></video>
+<small class="block article-caption">
+  CryoSTAR results on EMPIAR-10073.
+</small>
+
+### TRPV1 channel
+
+TRPV1 is a 380 kDa membrane protein. In this dataset (EMPIAR-10059), particles were solubilized in nanodisc.
+
+<video src="https://lf3-nlp-opensource.bytetos.com/obj/nlp-opensource/cryostar/videos/EMPIAR-10059.mp4" class="img-large" controls autoplay loop muted playsinline></video>
+<small class="block article-caption">
+  CryoSTAR results on EMPIAR-10059.
+</small>
+
+### α-latrocrustatoxin (α-LCT)
+
+α-latrocrustatoxin (α-LCT) is a 130 kDa spider toxin. In this dataset (EMPIAR-10827), two different conformations of α-LCT were found via discrete 3D classification, and the consensus reconstruction has a medium resolution.
+
+<video src="https://lf3-nlp-opensource.bytetos.com/obj/nlp-opensource/cryostar/videos/EMPIAR-10827.mp4" class="img-large" controls autoplay loop muted playsinline></video>
+<small class="block article-caption">
+  CryoSTAR results on EMPIAR-10827.
+</small>
+
+## Citation
+
+If you find CryoSTAR useful, please cite:
+```bibtex
+@article{li2023cryostar,
+  author={Li, Yilai and Zhou, Yi and Yuan, Jing and Ye, Fei and Gu, Quanquan},
+  title={CryoSTAR: leveraging structural priors and constraints for cryo-EM heterogeneous reconstruction},
+  journal={Nature Methods},
+  year={2024},
+  month={Oct},
+  day={29},
+  issn={1548-7105},
+  doi={10.1038/s41592-024-02486-1},
+  url={https://doi.org/10.1038/s41592-024-02486-1}
+}
+```
+

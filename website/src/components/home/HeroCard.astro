@@ -1,0 +1,339 @@
+---
+import OptimizedImage from "@/components/widgets/OptimizedImage.astro";
+
+// Define properties accepted by the component
+interface Props {
+  imageUrl: string; // Required
+  title?: string; // Optional, default "Home"
+  link?: string; // Optional, can be empty
+}
+
+// Set default values and receive incoming properties
+const {
+  imageUrl,
+  title = "Home",
+  link = ""
+} = Astro.props;
+---
+
+<div class="relative z-20 w-full web-case" data-href={link}>
+    <div
+        class="case-solid relative w-full h-full p-3 border-3 border-solid border-primary dark:border-primary"
+        >
+        <div class="case-square absolute top-[-5px] left-[-5px] border-2 border-solid border-primary dark:border-primary"></div>
+        <div class="case-square absolute top-[-5px] right-[-5px] border-2  border-solid border-primary dark:border-primary"></div>
+        <div class="case-square absolute bottom-[-5px] left-[-5px] border-2  border-solid border-primary dark:border-primary">
+        </div>
+        <div class="case-square absolute bottom-[-5px] right-[-5px] border-2  border-solid border-primary dark:border-primary"></div>
+
+        <div class="relative z-20 w-full">
+            <div class="relative top-0 left-0 w-full aspect-[6/7] overflow-hidden rounded-xl case-go">
+                <OptimizedImage
+                src={imageUrl}
+                alt={title || "Hero image"}
+                loading="eager"
+                decoding="auto"
+                formats={["webp", "avif", "png"]}
+                class="absolute top-0 left-0 right-0 z-30 w-full mx-auto object-cover"
+                />
+            </div>
+        </div>
+    </div>
+    <div class="acknowledgement absolute left-2 bottom-2 z-30 max-w-[90%]">
+      <span class="acknowledgement-text bg-white/80 text-[11px] text-gray-600 py-1 px-2 rounded shadow-sm backdrop-blur-sm border border-gray-200">
+        Illustration by David S. Goodsell, doi: <a href="https://doi.org/10.2210/rcsb_pdb/goodsell-gallery-029" class="underline hover:text-primary" target="_blank" rel="noopener">10.2210/rcsb_pdb/goodsell-gallery-029</a>
+      </span>
+    </div>
+    {title && (
+    <div
+    class="absolute left-[32px] text-center top-[-22px] h-[22px] leading-[22px] w-auto px-3 overflow-hidden rounded-tl-[6px] rounded-tr-[6px] bg-primary dark:bg-primary"
+    >
+    <p
+      class="text-[11px] font-normal text-center text-white"
+    >
+        {title}
+    </p>
+    </div>
+    )}
+
+    <div class="cursor-indicator">
+        <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="28"
+            height="28"
+            viewBox="0 0 24 24"
+            fill="none"
+            class="magnifier-icon"
+        >
+            <circle
+                cx="11"
+                cy="11"
+                r="7"
+                stroke="currentColor"
+                stroke-width="2"
+                fill="white"
+                fill-opacity="0.5"
+            />
+            <line
+                x1="16.1"
+                y1="16.1"
+                x2="21"
+                y2="21"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+            />
+        </svg>
+    </div>
+</div>
+
+<style>
+    .color {
+        box-shadow: -2px 4px 12px rgba(81, 74, 163, 0.1);
+        position: absolute;
+        right: -36px;
+        top:65%;
+        max-width:50%;
+        z-index:30;
+        border-radius:10px;
+    }
+    @media (max-width: 768px) {
+        .color {
+            right: -16px;
+        }
+    }
+
+    .case-square {
+        background:#fff;
+        height:12px;
+        width:12px;
+    }
+
+    /* Add styles for parallax effect */
+    .web-case, .color-picker, .color {
+        transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+        will-change: transform;
+    }
+
+    /* Hover style */
+    .case-go {
+        position: relative;
+        cursor: pointer; /* Default use pointer style */
+    }
+
+    /* When custom cursor is active, hide default mouse */
+    .case-go.cursor-active {
+        cursor: none !important;
+    }
+
+    /* Use global style to hide default mouse */
+    html.cursor-hidden .case-go {
+        cursor: none !important;
+    }
+
+    .cursor-indicator {
+        position: absolute; /* Relative to parent container */
+        top: 0;
+        left: 0;
+        background-color: rgba(255, 255, 255, 0.5);
+        width: 56px;
+        height: 56px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        box-shadow: 0 3px 15px rgba(0, 0, 0, 0.15);
+        z-index: 1000;
+        opacity: 0.5;
+        pointer-events: none;
+        transform: translate(-50%, -50%) scale(0.5);
+        transition: opacity 0.4s cubic-bezier(0.16, 1, 0.3, 1),
+                    transform 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+    }
+
+    /* Limit the maximum movement range of parallax effect */
+    @media (min-width: 1400px) {
+        .web-case {
+            overflow: visible; /* Allow parallax effect to exceed container */
+            max-width: 100%;
+        }
+    }
+    @media (min-width: 960px) {
+        .web-case {
+            overflow: visible; /* Allow parallax effect to exceed container */
+            max-width: 90%;
+        }
+    }
+    @media (min-width: 768px) {
+        .web-case {
+            overflow: visible; /* Allow parallax effect to exceed container */
+            max-width: 100%;
+        }
+
+        .color-picker {
+            left: -40px; /* Adjust position, prevent exceeding */
+            max-width: 35%;
+        }
+
+        .color {
+            right: -25px; /* Adjust position, prevent exceeding */
+            max-width: 45%;
+        }
+    }
+</style>
+
+<script>
+    document.addEventListener('DOMContentLoaded', () => {
+        // Get all needed elements
+        const webCase = document.querySelector('.web-case') as HTMLElement;
+        const colorPicker = document.querySelector('.color-picker') as HTMLElement;
+        const color = document.querySelector('.color') as HTMLElement;
+        const cursorIndicator = document.querySelector('.cursor-indicator') as HTMLElement;
+        const caseGo = document.querySelector('.case-go') as HTMLElement;
+        const html = document.documentElement;
+
+        // Check if on mobile device
+        const isMobile = window.innerWidth < 768;
+
+        // If on mobile device, do not enable parallax and custom cursor effect
+        if (isMobile) {
+            return;
+        }
+
+        // Strength coefficient of parallax effect
+        const webCaseStrength = 25;
+        const colorPickerStrength = 40;
+        const colorStrength = 50;
+
+        // Global variables, used to store mouse position and animation state
+        let mouseX = 0;
+        let mouseY = 0;
+        let targetX = 0;
+        let targetY = 0;
+        let cursorX = 0;
+        let cursorY = 0;
+        let isHovering = false;
+
+        // Smooth follow interpolation coefficient
+        const cursorEasing = 0.12;
+        const parallaxEasing = 0.08;
+
+        // Listen for global mouse movement - parallax effect
+        document.addEventListener('mousemove', (e: MouseEvent) => {
+            // Get the position relative to the viewport center (normalized to -0.5 ~ 0.5)
+            mouseX = (e.clientX / window.innerWidth) - 0.5;
+            mouseY = (e.clientY / window.innerHeight) - 0.5;
+        });
+
+        // Handle mouse events for clickable areas separately - custom cursor
+        if (caseGo) {
+            // Mouse enters clickable area
+            caseGo.addEventListener('mouseenter', () => {
+                isHovering = true;
+                html.classList.add('cursor-hidden');
+                if (cursorIndicator) {
+                    cursorIndicator.style.opacity = '1';
+                    cursorIndicator.style.transform = 'translate(-50%, -50%) scale(1)';
+                }
+            });
+
+            // Mouse leaves clickable area
+            caseGo.addEventListener('mouseleave', () => {
+                isHovering = false;
+                html.classList.remove('cursor-hidden');
+                if (cursorIndicator) {
+                    cursorIndicator.style.opacity = '0';
+                    cursorIndicator.style.transform = 'translate(-50%, -50%) scale(0.5)';
+                }
+            });
+
+                // Mouse moves in clickable area
+            caseGo.addEventListener('mousemove', (e: MouseEvent) => {
+                if (!isHovering) return;
+
+                // Get the position relative to the clickable area
+                const rect = caseGo.getBoundingClientRect();
+                targetX = e.clientX - rect.left;
+                targetY = e.clientY - rect.top;
+            });
+
+            // Click event
+            caseGo.addEventListener('click', () => {
+                const href = webCase?.getAttribute('data-href');
+                if (href) {
+                    window.open(href, '_blank');
+                }
+            });
+        }
+
+        // Separate animation loop - parallax effect
+        function updateParallax() {
+            // Update parallax effect of main card
+            if (webCase) {
+                const targetWebCaseX = mouseX * webCaseStrength;
+                const targetWebCaseY = mouseY * webCaseStrength;
+
+                // Get current transformation matrix
+                const currentTransform = new DOMMatrix(getComputedStyle(webCase).transform);
+                const currentX = currentTransform.m41 || 0;
+                const currentY = currentTransform.m42 || 0;
+
+                // Smooth transition
+                const newX = currentX + (targetWebCaseX - currentX) * parallaxEasing;
+                const newY = currentY + (targetWebCaseY - currentY) * parallaxEasing;
+
+                webCase.style.transform = `translate3d(${newX}px, ${newY}px, 0)`;
+            }
+
+            // Update parallax effect of color picker
+            if (colorPicker) {
+                const targetColorPickerX = mouseX * colorPickerStrength;
+                const targetColorPickerY = mouseY * colorPickerStrength;
+
+                const currentTransform = new DOMMatrix(getComputedStyle(colorPicker).transform);
+                const currentX = currentTransform.m41 || 0;
+                const currentY = currentTransform.m42 || 0;
+
+                const newX = currentX + (targetColorPickerX - currentX) * parallaxEasing;
+                const newY = currentY + (targetColorPickerY - currentY) * parallaxEasing;
+
+                colorPicker.style.transform = `translate3d(${newX}px, ${newY}px, 0)`;
+            }
+
+            // Update parallax effect of color bar
+            if (color) {
+                const targetColorX = mouseX * colorStrength;
+                const targetColorY = mouseY * colorStrength;
+
+                const currentTransform = new DOMMatrix(getComputedStyle(color).transform);
+                const currentX = currentTransform.m41 || 0;
+                const currentY = currentTransform.m42 || 0;
+
+                const newX = currentX + (targetColorX - currentX) * parallaxEasing;
+                const newY = currentY + (targetColorY - currentY) * parallaxEasing;
+
+                color.style.transform = `translate3d(${newX}px, ${newY}px, 0)`;
+            }
+
+            requestAnimationFrame(updateParallax);
+        }
+
+        // Separate animation loop - custom cursor
+        function updateCursor() {
+            if (isHovering && cursorIndicator) {
+                // Smooth follow
+                cursorX += (targetX - cursorX) * cursorEasing;
+                cursorY += (targetY - cursorY) * cursorEasing;
+
+                cursorIndicator.style.left = `${cursorX}px`;
+                cursorIndicator.style.top = `${cursorY}px`;
+            }
+
+            requestAnimationFrame(updateCursor);
+        }
+
+        // Start two separate animation loops
+        updateParallax();
+        updateCursor();
+    });
+</script>
