@@ -38,10 +38,7 @@
   </a>
 </p>
 
-
-
 <!-- =================================================== -->
-
 
 <br>
 <p align="center">
@@ -55,7 +52,7 @@ We are extremely delighted to release **CryoFM**, a flow-based foundation model 
 
 | Category | CryoFM2 | CryoFM1 |
 |----------|---------|---------|
-| **Papers & Reports** | <a href="XXX"><img src="https://img.shields.io/badge/Paper-Tech%20Report-4c566a?style=flat&logo=googlescholar&labelColor=111827" draggable="false"></a> | <a href="https://arxiv.org/abs/2410.08631"><img src="https://img.shields.io/badge/Paper-arXiv-4c566a?style=flat&logo=arxiv&labelColor=111827" draggable="false"></a> |
+| **Papers & Reports** | <a href="https://doi.org/10.64898/2025.12.29.696802"><img src="https://img.shields.io/badge/Paper-Tech%20Report-4c566a?style=flat&logo=googlescholar&labelColor=111827" draggable="false"></a> | <a href="https://arxiv.org/abs/2410.08631"><img src="https://img.shields.io/badge/Paper-arXiv-4c566a?style=flat&logo=arxiv&labelColor=111827" draggable="false"></a> |
 | **Model Weights** | <a href="https://huggingface.co/ByteDance-Seed/cryofm-v2"><img src="https://img.shields.io/badge/Models-cryofm--v2-fbbf24?style=flat&logo=huggingface&labelColor=111827" draggable="false"></a> | <a href="https://huggingface.co/ByteDance-Seed/cryofm-v1"><img src="https://img.shields.io/badge/Models-cryofm--v1-fbbf24?style=flat&logo=huggingface&labelColor=111827" draggable="false"></a> |
 | **User Guide** | <a href="https://bytedance-seed.github.io/cryofm/docs/model-guides/cryofm2/"><img src="https://img.shields.io/badge/Docs-User%20Guide-2e3440?style=flat&logo=readthedocs&labelColor=111827" draggable="false"></a> | <a href="https://bytedance-seed.github.io/cryofm/docs/model-guides/cryofm1/"><img src="https://img.shields.io/badge/Docs-User%20Guide-2e3440?style=flat&logo=readthedocs&labelColor=111827" draggable="false"></a> |
 
@@ -214,16 +211,29 @@ For more details, see the [CryoFM1 User Guide](https://bytedance-seed.github.io/
 
 For more details on data preparation, model customization, and advanced usage, please refer to the official documentation or contact the maintainers.
 
-
 ## License
 This project is licensed under the Apache License 2.0. See the [LICENSE](./LICENSE) file for details.
 
 ## Citation
 
-Citation for CryoFM2 will be available soon (TBA).
+If you use CryoFM in your research, please cite the relevant paper(s):
 
-If you find CryoFM1 useful for your research, please cite:
+**CryoFM2:**
+```bibtex
+@article {Li2025.12.29.696802,
+	author={Li, Yilai and Yuan, Jing and Zhou, Yi and Wang, Zhenghua and Chen, Suyi and Yang, Fengyu and Ling, Haibin and Kovalsky, Shahar Z and Zheng, Xiaoqing and Gu, Quanquan},
+	title={A Generative Foundation Model for Cryo-EM Densities},
+	elocation-id={2025.12.29.696802},
+	year={2025},
+	doi={10.64898/2025.12.29.696802},
+	publisher={Cold Spring Harbor Laboratory},
+	URL={https://www.biorxiv.org/content/early/2025/12/29/2025.12.29.696802},
+	eprint={https://www.biorxiv.org/content/early/2025/12/29/2025.12.29.696802.full.pdf},
+	journal={bioRxiv}
+}
+```
 
+**CryoFM1:**
 ```bibtex
 @inproceedings{
 zhou2025cryofm,
