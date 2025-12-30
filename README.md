@@ -30,7 +30,7 @@
   <a href="https://bytedance-seed.github.io/cryofm/docs">
     <img src="https://img.shields.io/badge/Docs-Guide-2e3440?style=flat&logo=readthedocs&labelColor=111827" alt="Docs" draggable="false">
   </a>
-  <a href="XXX">
+  <a href="https://huggingface.co/spaces/ByteDance-Seed/CryoFM2-Playground">
     <img src="https://img.shields.io/badge/Demo-Space-f97316?style=flat&logo=huggingface&labelColor=111827" alt="Demo" draggable="false">
   </a>
   <a href="https://github.com/ByteDance-Seed/cryofm/blob/main/LICENSE">
@@ -116,7 +116,7 @@ accelerate launch --num_processes 4 cfm denoise -i1 half_map_1.mrc -i2 half_map_
     --model-dir path/to/cryofm-v2/cryofm2-pretrain
 ```
 
-For more details and advanced options, refer to the [CryoFM2 User Guide](https://bytedance-seed.github.io/cryofm/docs/model-guides/cryofm2/).
+For more details and advanced options, refer to the [CryoFM2 User Guide](https://bytedance-seed.github.io/cryofm/docs/model-guides/cryofm2.html).
 
 
 ## Getting Started (For Developers)
@@ -159,7 +159,7 @@ python -m cryofm.projects.cryofm2.cond_sampling \
     --output-tag 0  --cfg-weight 0.5
 ```
 
-For more details, see the [CryoFM2 User Guide](https://bytedance-seed.github.io/cryofm/docs/model-guides/cryofm2/).
+For more details, see the [CryoFM2 User Guide](https://bytedance-seed.github.io/cryofm/docs/model-guides/cryofm2.html).
 
 ---
 
@@ -205,7 +205,7 @@ Run model evaluation/testing for various downstream tasks:
 
 Replace `path_to/cryofm-v1/cryofm-s/` with your actual model directory path. The model directory should contain `config.yaml` and `model.safetensors` files.
 
-For more details, see the [CryoFM1 User Guide](https://bytedance-seed.github.io/cryofm/docs/model-guides/cryofm1/).
+For more details, see the [CryoFM1 User Guide](https://bytedance-seed.github.io/cryofm/docs/model-guides/cryofm1.html).
 
 ---
 
