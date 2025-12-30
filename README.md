@@ -30,9 +30,6 @@
   <a href="https://bytedance-seed.github.io/cryofm/docs">
     <img src="https://img.shields.io/badge/Docs-Guide-2e3440?style=flat&logo=readthedocs&labelColor=111827" alt="Docs" draggable="false">
   </a>
-  <a href="https://huggingface.co/spaces/ByteDance-Seed/CryoFM2-Playground">
-    <img src="https://img.shields.io/badge/Demo-Space-f97316?style=flat&logo=huggingface&labelColor=111827" alt="Demo" draggable="false">
-  </a>
   <a href="https://github.com/ByteDance-Seed/cryofm/blob/main/LICENSE">
     <img src="https://img.shields.io/badge/License-Apache--2.0-64748b?style=flat&logo=apache&labelColor=111827" alt="License" draggable="false">
   </a>
