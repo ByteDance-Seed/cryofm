@@ -84,21 +84,83 @@ def dig_nested(nested, keys):
 
 
 def download_file(url, save_path, cli="aria2c"):
+    """
+    Download a file from URL to save_path.
+    
+    Args:
+        url: URL of the file to download
+        save_path: Local path where the file should be saved
+        cli: Download tool to use. Options: "aria2c", "wget", "curl", "urllib". 
+             Defaults to "aria2c". Falls back to "urllib" if specified tool is not available.
+    
+    Returns:
+        bool: True if download succeeded, False otherwise
+    """
+    # Create directory if it doesn't exist
+    os.makedirs(osp.dirname(save_path), exist_ok=True)
+    
     if cli == "aria2c":
-        if url.endswith(".gz") or url.endswith(".map"):
-            cmd = [cli, "-d", osp.dirname(save_path), "-q", "-s", "60", url]
-        else:
-            cmd = [cli, "-d", osp.dirname(save_path), "-q", url]
+        try:
+            # aria2c parameters explanation:
+            # -d: download directory
+            # -o: output filename
+            # -q: quiet mode (suppress output)
+            # -s: split file into N segments for parallel download (60 segments for .gz/.map files)
+            # -x: maximum number of connections per server (16 connections)
+            #     This allows aria2c to open up to 16 parallel connections to the same server,
+            #     significantly improving download speed for large files
+            # --file-allocation=none: do not pre-allocate disk space before downloading
+            #     This speeds up the start of downloads, especially for large files,
+            #     as it doesn't need to allocate the full file size upfront
+            # --continue: resume a partially downloaded file (automatically handles incomplete downloads)
+            if url.endswith(".gz") or url.endswith(".map"):
+                cmd = [cli, "-d", osp.dirname(save_path), "-o", osp.basename(save_path), 
+                        "-q", "-s", "60", "-x", "16", "--file-allocation=none", 
+                        "--continue", url]
+            else:
+                cmd = [cli, "-d", osp.dirname(save_path), "-o", osp.basename(save_path), 
+                        "-q", "-x", "16", "--file-allocation=none", 
+                        "--continue", url]
+            subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=3600)
+            return True
+        except (subprocess.CalledProcessError, FileNotFoundError, TimeoutError):
+            # Fallback to urllib if aria2c fails or is not available
+            return download_file(url, save_path, cli="urllib")
     elif cli == "wget":
-        cmd = [cli, "-o", save_path, "-q", url]
+        try:
+            # wget parameters:
+            # -O: output filename
+            # -q: quiet mode
+            cmd = [cli, "-O", save_path, "-q", url]
+            subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=3600)
+            return True
+        except (subprocess.CalledProcessError, FileNotFoundError, TimeoutError):
+            # Fallback to urllib if wget fails or is not available
+            return download_file(url, save_path, cli="urllib")
+    elif cli == "curl":
+        try:
+            # curl parameters:
+            # -L: follow redirects
+            # -o: output filename
+            # -s: silent mode (suppress progress meter)
+            # --fail: fail silently on HTTP errors
+            cmd = [cli, "-L", "-o", save_path, "-s", "--fail", url]
+            subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=3600)
+            return True
+        except (subprocess.CalledProcessError, FileNotFoundError, TimeoutError):
+            # Fallback to urllib if curl fails or is not available
+            return download_file(url, save_path, cli="urllib")
+    elif cli == "urllib":
+        from urllib.error import URLError
+        from urllib.request import urlretrieve
+        try:
+            urlretrieve(url, save_path)
+            return True
+        except (URLError, OSError, Exception) as e:
+            print(f"An error occurred while downloading the file: {e}")
+            return False
     else:
-        raise NotImplementedError(f"{cli}")
-    try:
-        subprocess.call(cmd)
-        # print(f"File downloaded successfully in {save_path}.")
-
-    except subprocess.CalledProcessError as error:
-        print(f"An error occurred while downloading the file. {error}")
+        raise NotImplementedError(f"Unsupported CLI tool: {cli}")
 
 
 def extract_file(file_path, target_path=None):

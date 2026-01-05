@@ -28,13 +28,13 @@ classifiers = [
 
 dependencies = [
     "pandas",
-    "numpy",
+    "numpy<2.0",
     "torch",
     "scipy",
     "mmengine",
     "monai",
     "mrcfile",
-    "starfile",
+    "starfile>=0.4.12,!=0.11,!=0.12,!=0.111",
     "xmltodict",
     "requests",
     "accelerate",
@@ -88,4 +88,3 @@ ignore = []
 
 [tool.ruff.per-file-ignores]
 "__init__.py" = ["F401"]  # Allow unused imports in __init__.py
-

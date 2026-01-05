@@ -45,7 +45,10 @@ nav:
       # - getting-started/examples.md
   - Model Guides:
       - model-guides/cryofm2.md
-      - model-guides/cryofm1.md
+      - CryoFM1:
+          - Overview: model-guides/cryofm1/index.md
+          - Sampling: model-guides/cryofm1/sampling.md
+          - Downstream Tasks: model-guides/cryofm1/downstream-tasks.md
   - How-to Guides:
       - how-to/working-with-emdb.md
   # - API Reference:
@@ -67,9 +70,14 @@ markdown_extensions:
   - pymdownx.details
   - pymdownx.tabbed:
       alternate_style: true
+  - pymdownx.arithmatex:
+      generic: true
   - tables
   - attr_list
   - md_in_html
+
+extra_javascript:
+  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
 
 plugins:
   - search

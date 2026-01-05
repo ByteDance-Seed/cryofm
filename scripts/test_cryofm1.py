@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import time
+import contextlib
 import os.path as osp
 from pathlib import Path
 from typing import List, Callable
@@ -20,6 +21,7 @@ from argparse import ArgumentParser
 
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 import torch
 from torch import nn
@@ -62,6 +64,7 @@ BASE_CONFIG = Config(
 
         model_dir=None,
         ckpt=None,
+        bf16=False,
 
         prior=dict(
             prior_type="fm",  # "fm" or "ddpm"
@@ -103,6 +106,8 @@ def parse_args():
     group.add_argument("--model-dir", action="store", type=str, required=True)
     group.add_argument('--log-level', default='INFO',
                        help='Set the logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)')
+    group.add_argument("--bf16", action="store_true", default=False,
+                       help='Use bfloat16 precision for model inference')
 
     group = parser.add_argument_group('DPS', 'DPS hyperparameters')
     group.add_argument("--num-timesteps", action="store", type=int, default=200)
@@ -436,7 +441,7 @@ def run_dps(exp_cfg: Config, model_cfg: Config, scheduler, op: BaseOperator,
             lamb_base = exp_cfg.dps.lamb_base
             lamb_decay = 100
 
-    for t in scheduler.timesteps:
+    for t in tqdm(scheduler.timesteps):
         _t = t.item()
 
         x_t.requires_grad_(True)
@@ -605,8 +610,11 @@ def main(acl: Accelerator, cfg: Config):
         op1, op2 = estimate_half_map_operators(y, y1, y2, cfg, y1_y2_fsc, fsc_freq, op, save_dir)
 
         # Run DPS
-        new_y1 = run_dps(cfg, lit_model.cfg, scheduler, op1, model, y1, device, map_id, 1)
-        new_y2 = run_dps(cfg, lit_model.cfg, scheduler, op2, model, y2, device, map_id, 2)
+        with contextlib.ExitStack() as stack:
+            if cfg.bf16:
+                stack.enter_context(torch.autocast(device_type=device.type, dtype=torch.bfloat16))
+            new_y1 = run_dps(cfg, lit_model.cfg, scheduler, op1, model, y1, device, map_id, 1)
+            new_y2 = run_dps(cfg, lit_model.cfg, scheduler, op2, model, y2, device, map_id, 2)
         toc = time.time()
         time_elapsed.append(toc - tic)
 
@@ -629,7 +637,16 @@ def main(acl: Accelerator, cfg: Config):
     #     wandb.summary["running_time"] = time_elapsed
     #     wandb.log({"summary": wandb.Table(dataframe=df)})
 
-    logger.info("\n" + df.to_string(float_format=lambda x: "{:.2f}".format(x)))
+    # Print detailed results (type, id 0 to id 31)
+    id_columns = ["type"] + ["id " + str(i) for i in range(n_samples)]
+    df_details = df[id_columns]
+    logger.info("\nDetailed Results:")
+    logger.info("\n" + df_details.to_string(float_format=lambda x: "{:.2f}".format(x)))
+
+    # Print summary statistics (type, mean, std)
+    df_summary = df[["type", "mean", "std"]]
+    logger.info("\nSummary Statistics:")
+    logger.info("\n" + df_summary.to_string(float_format=lambda x: "{:.2f}".format(x)))
 
 
 # load model from trained checkpoint (for development/testing)
