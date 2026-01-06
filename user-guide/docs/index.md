@@ -29,7 +29,7 @@ CryoFM currently includes two major versions:
 ## Get Started
 
 - [Installation Guide](getting-started/installation.md)
-- [CryoFM2 Model Guide](model-guides/cryofm2.md)
+- [CryoFM2 Model Guide](model-guides/cryofm2/index.md)
 - [CryoFM1 Model Guide](model-guides/cryofm1/index.md)
 
 Visit the User Guide for detailed documentation of CryoFM’s core modules, advanced features, and troubleshooting tips.

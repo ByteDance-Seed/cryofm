@@ -44,7 +44,13 @@ nav:
       # - getting-started/quick-start.md
       # - getting-started/examples.md
   - Model Guides:
-      - model-guides/cryofm2.md
+      - CryoFM2:
+          - Overview: model-guides/cryofm2/index.md
+          - Quick Start: model-guides/cryofm2/quick-start.md
+          - Operators: model-guides/cryofm2/operators.md
+          - For Developers:
+              - Unconditional Sampling: model-guides/cryofm2/unconditional-sampling.md
+              - Likelihood Control: model-guides/cryofm2/likelihood-control.md
       - CryoFM1:
           - Overview: model-guides/cryofm1/index.md
           - Sampling: model-guides/cryofm1/sampling.md

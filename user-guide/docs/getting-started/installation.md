@@ -9,12 +9,16 @@ We strongly recommend **using a dedicated environment** to install and use CryoF
 Whether you are a regular user or a developer, **always create a new, separate environment** for CryoFM. Here is the recommended installation process:
 
 ```bash
+# Clone the repository
+git clone https://github.com/ByteDance-Seed/cryofm.git
+cd cryofm
+
 # Create a new conda environment for CryoFM (recommended)
-conda create -n cryofm python=3.9 -y
+conda create -n cryofm python=3.10 -y
 conda activate cryofm
 
-# Install CryoFM via pip
-pip install cryofm
+# Install CryoFM
+pip install .
 ```
 
 This will install CryoFM along with all of its required dependencies in an isolated environment.
@@ -31,11 +35,8 @@ git clone https://github.com/ByteDance-Seed/cryofm.git
 cd cryofm
 
 # Create and activate a new conda environment for development
-conda create -n cryofm-dev python=3.9 -y
+conda create -n cryofm-dev python=3.10 -y
 conda activate cryofm-dev
-
-# Install required dependencies
-pip install -r requirements.txt
 
 # Install CryoFM in editable (development) mode
 pip install -e .
@@ -47,9 +48,8 @@ Using a dedicated environment ensures that your development work does not interf
 
 ## 3. Additional Notes
 
-- Certain optional features may require extra dependencies. Please see the [documentation](https://github.com/ByteDance-Seed/cryofm) for details.
-- For advanced installation options (including GPU support), refer to the project README.
-- If you encounter installation or environment issues, see the [Troubleshooting](../troubleshooting/common-issues.md) section.
+- Certain optional features may require extra dependencies. For example, see the [CryoFM1 Prerequisites](../model-guides/cryofm1/sampling.md#prerequisites). 
+- If you encounter issues, see the [Troubleshooting](../troubleshooting/common-issues.md) section.
 
 ---
 

@@ -51,158 +51,74 @@ We are extremely delighted to release **CryoFM**, a flow-based foundation model 
 |----------|---------|---------|
 | **Papers & Reports** | <a href="https://doi.org/10.64898/2025.12.29.696802"><img src="https://img.shields.io/badge/Paper-Tech%20Report-4c566a?style=flat&logo=googlescholar&labelColor=111827" draggable="false"></a> | <a href="https://arxiv.org/abs/2410.08631"><img src="https://img.shields.io/badge/Paper-arXiv-4c566a?style=flat&logo=arxiv&labelColor=111827" draggable="false"></a> |
 | **Model Weights** | <a href="https://huggingface.co/ByteDance-Seed/cryofm-v2"><img src="https://img.shields.io/badge/Models-cryofm--v2-fbbf24?style=flat&logo=huggingface&labelColor=111827" draggable="false"></a> | <a href="https://huggingface.co/ByteDance-Seed/cryofm-v1"><img src="https://img.shields.io/badge/Models-cryofm--v1-fbbf24?style=flat&logo=huggingface&labelColor=111827" draggable="false"></a> |
-| **User Guide** | <a href="https://bytedance-seed.github.io/cryofm/docs/model-guides/cryofm2.html"><img src="https://img.shields.io/badge/Docs-User%20Guide-2e3440?style=flat&logo=readthedocs&labelColor=111827" draggable="false"></a> | <a href="https://bytedance-seed.github.io/cryofm/docs/model-guides/cryofm1/index.html"><img src="https://img.shields.io/badge/Docs-User%20Guide-2e3440?style=flat&logo=readthedocs&labelColor=111827" draggable="false"></a> |
+| **User Guide** | <a href="https://bytedance-seed.github.io/cryofm/docs/model-guides/cryofm2/index.html"><img src="https://img.shields.io/badge/Docs-User%20Guide-2e3440?style=flat&logo=readthedocs&labelColor=111827" draggable="false"></a> | <a href="https://bytedance-seed.github.io/cryofm/docs/model-guides/cryofm1/index.html"><img src="https://img.shields.io/badge/Docs-User%20Guide-2e3440?style=flat&logo=readthedocs&labelColor=111827" draggable="false"></a> |
 
 
 ## Getting started (For end users)
 
-This section describes the basic usage of CryoFM for end users. CryoFM provides two model versions (CryoFM1 and CryoFM2) for various cryo-EM density map tasks.
+### Installation
 
-### CryoFM2 - Density Map Modification and Enhancement
+```bash
+# Clone the repository
+git clone https://github.com/ByteDance-Seed/cryofm.git
+cd cryofm
+
+# Create a new conda environment for CryoFM (recommended)
+conda create -n cryofm python=3.10 -y
+conda activate cryofm
+
+# Install CryoFM
+pip install .
+```
+
+For detailed installation instructions and troubleshooting, see the [Installation Guide](https://bytedance-seed.github.io/cryofm/docs/getting-started/installation.html).
+
+### Quick Start
 
 CryoFM2 is recommended for most practical applications. It supports density map denoising, inpainting, and style enhancement.
 
-#### Denoising a density map
+#### CryoFM2 - Density Map Modification and Enhancement
 
-Remove noise from a pair of half maps:
+CryoFM2 supports density map denoising, inpainting, anisotropy correction, and style enhancement.
+
+**Example: Denoising a density map**
 
 ```bash
-# Single GPU
 cfm denoise -i1 half_map_1.mrc -i2 half_map_2.mrc -o ./output \
     --model-dir path/to/cryofm-v2/cryofm2-pretrain \
     --op denoise --norm-grad --use-lamb-w
-
-# Multiple GPUs
-cfm denoise --num_processes 4 -i1 half_map_1.mrc -i2 half_map_2.mrc -o ./output \
-    --model-dir path/to/cryofm-v2/cryofm2-pretrain \
-    --op denoise --norm-grad --use-lamb-w
 ```
 
-#### Density map enhancement (EMhancer style)
-
-Apply EMhancer-style enhancement:
+**Example: Style enhancement**
 
 ```bash
-# Single GPU
+# EMhancer style
 cfm enhance -i input_map.mrc -o ./output_emhancer \
     --model-dir path/to/cryofm-v2/cryofm2-emhancer --output-tag 1
 
-# Multiple GPUs
-cfm enhance --num_processes 2 -i input_map.mrc -o ./output_emhancer \
-    --model-dir path/to/cryofm-v2/cryofm2-emhancer --output-tag 1
-```
-
-#### Density map enhancement (EMReady style)
-
-Apply EMReady-style enhancement:
-
-```bash
-# Single GPU
+# EMReady style
 cfm enhance -i input_map.mrc -o ./output_emready \
-    --model-dir path/to/cryofm-v2/cryofm2-emready --output-tag 0  --cfg-weight 0.5
-
-# Multiple GPUs
-cfm enhance --num_processes 2 -i input_map.mrc -o ./output_emready \
-    --model-dir path/to/cryofm-v2/cryofm2-emready --output-tag 0  --cfg-weight 0.5
+    --model-dir path/to/cryofm-v2/cryofm2-emready --output-tag 0 --cfg-weight 0.5
 ```
 
-**Note:** The CLI commands automatically handle accelerate multi-GPU setup when `--num_processes` is specified. You can also use `accelerate launch` directly for more control:
-
-```bash
-accelerate launch --num_processes 4 cfm denoise -i1 half_map_1.mrc -i2 half_map_2.mrc -o ./output \
-    --model-dir path/to/cryofm-v2/cryofm2-pretrain
-```
-
-For more details and advanced options, refer to the [CryoFM2 User Guide](https://bytedance-seed.github.io/cryofm/docs/model-guides/cryofm2.html).
+For more examples and advanced options, refer to the [CryoFM2 Quick Start Guide](https://bytedance-seed.github.io/cryofm/docs/model-guides/cryofm2/quick-start.html).
 
 
 ## Getting Started (For Developers)
 
 This section provides a quick start guide for developers who wish to pretrain, fine-tune, or test CryoFM models. Please refer to the [documentation](https://bytedance-seed.github.io/cryofm/docs/) for further details and customization.
 
----
-
 ### CryoFM2
 
-#### Unconditional Generation
-
-Generate samples from the pretrained model:
-
-```bash
-python -m cryofm.projects.cryofm2.uncond_sampling \
-    -i1 half_map_1.mrc \
-    -i2 half_map_2.mrc \
-    -o ./output \
-    --model-dir path/to/cryofm-v2/cryofm2-pretrain
-```
-
-#### Conditional Generation (Style Enhancement)
-
-Generate enhanced density maps with different styles:
-
-```bash
-# EMhancer style
-python -m cryofm.projects.cryofm2.cond_sampling \
-    -i input_map.mrc \
-    -o ./output \
-    --model-dir path/to/cryofm-v2/cryofm2-emhancer \
-    --output-tag 1
-
-# EMReady style
-python -m cryofm.projects.cryofm2.cond_sampling \
-    -i input_map.mrc \
-    -o ./output \
-    --model-dir path/to/cryofm-v2/cryofm2-emready \
-    --output-tag 0  --cfg-weight 0.5
-```
-
-For more details, see the [CryoFM2 User Guide](https://bytedance-seed.github.io/cryofm/docs/model-guides/cryofm2.html).
-
----
+For unconditional generation, conditional generation, and likelihood control, see:
+- [CryoFM2 Unconditional Sampling](https://bytedance-seed.github.io/cryofm/docs/model-guides/cryofm2/unconditional-sampling.html)
+- [CryoFM2 Likelihood Control](https://bytedance-seed.github.io/cryofm/docs/model-guides/cryofm2/likelihood-control.html)
 
 ### CryoFM1
 
-#### Testing Downstream Tasks
-
-Run model evaluation/testing for various downstream tasks:
-
-- **Spectral Noise Denoising**
-    ```bash
-    python scripts/test_cryofm1.py \
-        --data-root path_to/cryofm1_1-5apix_dataset/ \
-        --model-dir path_to/cryofm-v1/cryofm-s/ \
-        --exp-name cryofm_sn_snr1 \
-        --num-timesteps 1000 \
-        --task-names spectral_noise \
-        --snr-idx 1
-    ```
-
-- **Anisotropic Noise Denoising**
-    ```bash
-    python scripts/test_cryofm1.py \
-        --data-root path_to/cryofm1_1-5apix_dataset/ \
-        --model-dir path_to/cryofm-v1/cryofm-s/ \
-        --exp-name cryofm_asn_snr1_tilt15 \
-        --num-timesteps 1000 \
-        --task-names anisotropic_spectral_noise \
-        --snr-idx 1 \
-        --tilt-angle 15
-    ```
-
-- **Missing Wedge Restoration**
-    ```bash
-    python scripts/test_cryofm1.py \
-        --data-root path_to/cryofm1_1-5apix_dataset/ \
-        --model-dir path_to/cryofm-v1/cryofm-s/ \
-        --exp-name cryofm_mw_tilt60 \
-        --num-timesteps 1000 \
-        --task-names missing_wedge \
-        --tilt-angle 60
-    ```
-
-Replace `path_to/cryofm-v1/cryofm-s/` with your actual model directory path. The model directory should contain `config.yaml` and `model.safetensors` files.
-
-For more details, see the [CryoFM1 User Guide](https://bytedance-seed.github.io/cryofm/docs/model-guides/cryofm1/index.html).
+For sampling and downstream tasks (denoising, anisotropy correction, missing wedge restoration), see:
+- [CryoFM1 Sampling Guide](https://bytedance-seed.github.io/cryofm/docs/model-guides/cryofm1/sampling.html)
+- [CryoFM1 Downstream Tasks](https://bytedance-seed.github.io/cryofm/docs/model-guides/cryofm1/downstream-tasks.html)
 
 ---
 

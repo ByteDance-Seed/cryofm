@@ -120,7 +120,7 @@ def parse_args():
                              help="Max weight for decayed lamb scheduler")
     model_group.add_argument("--norm-grad", action='store_true', default=False,
                              help="Use normalized gradient")
-    model_group.add_argument("--fmask-threshold", action='store', type=float, default=1,
+    model_group.add_argument("--fmask-threshold", action='store', type=float, default=10.0,
                              help="Threshold for inpaint fourier mask")
     model_group.add_argument("--threshold-res", action='store', type=float, default=10.0)
     model_group.add_argument("--nbands", action='store', type=int, default=64)
