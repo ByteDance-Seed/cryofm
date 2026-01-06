@@ -284,7 +284,9 @@ def _single_map_process(
         input_data: InputData,
         scheduler,
         unet,
-        acl: accelerate.Accelerator, ):
+        acl: accelerate.Accelerator, 
+        logger,
+        ):
     device = acl.device
 
     # 1. prepare input data
@@ -420,6 +422,7 @@ def refine3d(
     scheduler,
     unet,
     acl: accelerate.Accelerator,
+    logger,
 ):
     def _save_helper(cur_input, cur_output):
         if cur_input.mode == "refine":
@@ -439,12 +442,12 @@ def refine3d(
         if input_data1.mode == "refine_final":
             final_output1 = input_data1.recons_unfil
         else:
-            final_output1 = _single_map_process(args, input_data1, scheduler, unet, acl)
+            final_output1 = _single_map_process(args, input_data1, scheduler, unet, acl, logger=logger)
     if input_data2 is not None:
         if input_data2.mode == "refine_final":
             final_output2 = input_data2.recons_unfil
         else:
-            final_output2 = _single_map_process(args, input_data2, scheduler, unet, acl)
+            final_output2 = _single_map_process(args, input_data2, scheduler, unet, acl, logger=logger)
 
     # fsc weighting
     if args.fsc_weighting and (final_output1 is not None and final_output2 is not None):
@@ -457,7 +460,7 @@ def refine3d(
         if final_output2 is not None:
             _save_helper(input_data2, final_output2)
         # save avg
-        if final_output1 is not None and final_output2 is not None:
+        if final_output1 is not None and final_output2 is not None and args.output_dir is not None:
             save_mrc(np.asarray((final_output1 + final_output2) / 2, dtype=np.float32),
                      osp.join(args.output_dir, "avg_external_reconstruct.mrc"), input_data1.pixel_size, np.array([0, 0, 0]))
 
@@ -487,7 +490,8 @@ if __name__ == "__main__":
             input_data2=input_data2_,
             scheduler=scheduler_,
             unet=unet_,
-            acl=accelerator
+            acl=accelerator,
+            logger=logger
         )
     else:
         raise NotImplementedError(f"Mode not supported: {input_data1_.mode}")

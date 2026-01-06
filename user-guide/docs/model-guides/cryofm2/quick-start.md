@@ -99,4 +99,44 @@ accelerate launch --num_processes 4 cfm denoise -i1 half_map_1.mrc -i2 half_map_
 
 ### Use in RELION
 
-TBA
+CryoFM2 can be integrated with RELION's refinement pipeline through the `--external_reconstruct` option. This allows RELION to use CryoFM2 for map reconstruction during the refinement process.
+
+Here's an example script for running RELION refinement with CryoFM2:
+
+```bash
+# Set project paths
+EXP_DIR=/path/to/relion/project
+OUTPUT_DIR=Refine3D_cryofm2/job001
+REF_MAP_PATH=reference_map.mrc
+MASK_MAP_PATH=solvent_mask.mrc
+
+# Set up environment variables, if you have 8 GPU, you should use --num_processes 8
+export NCCL_DEBUG=ERROR
+export CONDA_ENV="cryofm"
+export CRYOFM_MODEL_DIR=/path/to/cryofm-v2/cryofm2-pretrain
+export RELION_EXTERNAL_RECONSTRUCT_EXECUTABLE="/path/to/bin/accelerate launch --num_processes 8 /path/to/cryofm/relion/relion_wrapper.py  --mask-path ${MASK_MAP_PATH} --op denoise inpaint --fmask-threshold 10 --threshold-res 10 --bbox --norm-grad --use-lamb-w --skip-spectral-trailing --spectral-mixing"
+
+cd ${EXP_DIR}
+mkdir -p ${OUTPUT_DIR}
+
+# Run RELION refinement with CryoFM2
+mpirun  relion_refine_mpi \
+  --o ${OUTPUT_DIR}/run \
+  --auto_refine \
+  --split_random_halves \
+  --i particles.star \
+  --ref ${REF_MAP_PATH} \
+  ...
+  --external_reconstruct |& tee ${OUTPUT_DIR}/console_log.txt
+```
+
+**Key parameters:**
+
+- `CRYOFM_MODEL_DIR`: Path to the CryoFM2 model directory
+- `RELION_EXTERNAL_RECONSTRUCT_EXECUTABLE`: Command to launch the CryoFM2 wrapper with desired operators and options
+- `--op denoise inpaint`: Forward operators for denoising and inpainting
+- `--mask-path`: Path to the solvent mask (to speed up CryoFM inference)
+- `--num_processes`: Number of GPUs to use for CryoFM2 processing
+- `--external_reconstruct`: RELION flag to use external reconstruction executable
+
+Adjust the number of processes, and other RELION parameters according to your dataset configuration.
