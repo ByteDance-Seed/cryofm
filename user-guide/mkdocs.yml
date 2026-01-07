@@ -51,6 +51,7 @@ nav:
           - For Developers:
               - Unconditional Sampling: model-guides/cryofm2/unconditional-sampling.md
               - Likelihood Control: model-guides/cryofm2/likelihood-control.md
+              - GUI Demo: model-guides/cryofm2/gui-demo.md
       - CryoFM1:
           - Overview: model-guides/cryofm1/index.md
           - Sampling: model-guides/cryofm1/sampling.md

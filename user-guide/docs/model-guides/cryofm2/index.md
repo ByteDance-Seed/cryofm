@@ -47,6 +47,7 @@ CryoFM2 is available in three variants:
 
 - [Unconditional Sampling](unconditional-sampling.md): Learn how to use the Python API to generate unconditional samples from CryoFM2 models.
 - [Likelihood Control](likelihood-control.md): Understand how to use scripts for likelihood control (FPS) and fine-tune parameters for different tasks.
+- [GUI Demo](gui-demo.md): Try CryoFM2 through an interactive web-based graphical interface.
 
 ---
 
