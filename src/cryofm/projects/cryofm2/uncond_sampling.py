@@ -47,6 +47,7 @@ import os
 # import time
 # import copy
 # import math
+import logging
 import argparse
 import os.path as osp
 from pathlib import Path
@@ -70,8 +71,6 @@ from accelerate.logging import get_logger
 from accelerate.utils import broadcast_object_list
 
 from cryofm.core.training.accelerate_utils import setup_logging
-from cryofm.core.training.lightning_utils import autoload_model
-from cryofm.core.utils.ckpt_loading import get_ckpt_by_step
 
 # from utils.bp_reconstruct import BackprojectReconstruct
 from cryofm.projects.cryofm2.lit_modules import CryoFM2Uncond
@@ -468,11 +467,21 @@ def refine3d(
 
 
 if __name__ == "__main__":
+    # Import MainProcessFilter here to avoid circular import at module level
+    from cryofm.projects.cryofm2.sampling_helper import MainProcessFilter
+    
     cli_args = parse_args()
     setup_logging(cli_args.log_file_path)
     logger = get_logger(__name__)
 
     accelerator = accelerate.Accelerator()
+
+    # Add main process filter to all logger handlers
+    # Note: get_logger() returns MultiProcessAdapter which doesn't have handlers attribute,
+    # so we only add filter to root handlers (setup_logging already adds handlers to root logger)
+    main_process_filter = MainProcessFilter(accelerator)
+    for handler in logging.root.handlers:
+        handler.addFilter(main_process_filter)
 
     lit_model_, unet_, scheduler_ = load_model(cli_args, device=accelerator.device)
 

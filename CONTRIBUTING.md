@@ -109,6 +109,85 @@ release/v1.2.0
 chore/update-dependencies
 ```
 
+## Updating User Guide
+
+The user guide is located in the `user-guide/` directory and uses [MkDocs](https://www.mkdocs.org/) for documentation generation.
+
+### Prerequisites
+
+1. Install MkDocs and required plugins:
+```bash
+pip install mkdocs mkdocs-material
+```
+
+2. Navigate to the user guide directory:
+```bash
+cd user-guide
+```
+
+### Making Changes
+
+1. Edit the Markdown files in `user-guide/docs/` directory
+2. If adding a new page, update `user-guide/mkdocs.yml` to include it in the navigation
+3. Preview your changes locally:
+```bash
+mkdocs serve
+```
+This will start a local server (usually at `http://127.0.0.1:8000`) where you can preview the documentation
+
+### Example: Adding a New Guide
+
+**Step 1:** Create a new Markdown file in the appropriate directory:
+```bash
+# For example, adding a new how-to guide
+touch user-guide/docs/how-to/new-feature.md
+```
+
+**Step 2:** Add content to the file:
+```markdown
+# New Feature Guide
+
+This guide explains how to use the new feature...
+
+## Getting Started
+
+...
+```
+
+**Step 3:** Update `user-guide/mkdocs.yml` to include the new page in navigation:
+```yaml
+nav:
+  - How-to Guides:
+      - how-to/working-with-emdb.md
+      - how-to/new-feature.md  # Add your new page here
+```
+
+**Step 4:** Commit your changes:
+```bash
+git add user-guide/docs/how-to/new-feature.md user-guide/mkdocs.yml
+git commit -m "docs: add guide for new feature"
+```
+
+### Example: Updating Existing Documentation
+
+**Step 1:** Edit the existing Markdown file:
+```bash
+# Edit the file you want to update
+code user-guide/docs/getting-started/installation.md
+```
+
+**Step 2:** Preview your changes:
+```bash
+cd user-guide
+mkdocs serve
+```
+
+**Step 3:** Commit your changes:
+```bash
+git add user-guide/docs/getting-started/installation.md
+git commit -m "docs: update installation instructions"
+```
+
 ## Questions?
 
 If you have questions about contributing or version management, please open an issue on GitHub.

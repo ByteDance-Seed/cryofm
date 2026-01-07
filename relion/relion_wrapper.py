@@ -19,9 +19,11 @@ RELION External Reconstruct Wrapper for CryoFM2
 import os
 import sys
 import re
-import argparse
 import os.path as osp
 import time
+import shutil
+import logging
+import subprocess
 from filelock import FileLock, Timeout
 
 import accelerate
@@ -29,12 +31,13 @@ from accelerate.logging import get_logger
 from accelerate import PartialState
 
 from cryofm.core.training.accelerate_utils import setup_logging
+# Import MainProcessFilter first from sampling_helper to avoid circular import
+from cryofm.projects.cryofm2.sampling_helper import InputData, MainProcessFilter
 from cryofm.projects.cryofm2.uncond_sampling import (
     load_model, parse_args, refine3d,
     rln_ext_starfile_load_helper, detect_cryoem_file_type
 )
 from cryofm.projects.cryofm2.utils.infer_relion_utils import load_star, get_reconstructions
-from cryofm.projects.cryofm2.sampling_helper import InputData
 
 
 def find_corresponding_half_starfile(starfile_path):
@@ -236,19 +239,59 @@ def main():
     """Main entry point for RELION wrapper."""
     args = parse_relion_wrapper_args()
     
-    # Initialize accelerate state before using logger
-    # Use PartialState for lightweight initialization (sufficient for logging)
-    _ = PartialState()
-    
-    # Setup logging
-    setup_logging(args.log_file_path)
-    logger = get_logger(__name__)
-    
     starfile_path = args.starfile
     
     # Check if it's a starfile
     if detect_cryoem_file_type(starfile_path) != "STAR":
         raise ValueError(f"Input file must be a STAR file, got: {starfile_path}")
+    
+    # CRITICAL: Handle port conflict BEFORE initializing accelerate
+    # When RELION launches both half1 and half2 simultaneously with accelerate,
+    # they both try to use the same default port (29500), causing EADDRINUSE error.
+    # Solution: Use CRYOFM_HALF1_PORT and CRYOFM_HALF2_PORT environment variables
+    # to specify different ports for each half. Defaults: half1=29500, half2=29501.
+    configured_port = None
+    port_source = None
+    if os.environ.get("LOCAL_RANK") is not None or os.environ.get("RANK") is not None:
+        # We're running under accelerate launch - set port based on half1/half2
+        # This must be done BEFORE any accelerate initialization (PartialState/Accelerator)
+        if is_half1(starfile_path):
+            configured_port = os.environ.get("CRYOFM_HALF1_PORT", "29500")
+            port_source = "CRYOFM_HALF1_PORT" if os.environ.get("CRYOFM_HALF1_PORT") else "default (29500)"
+        elif is_half2(starfile_path):
+            configured_port = os.environ.get("CRYOFM_HALF2_PORT", "29501")
+            port_source = "CRYOFM_HALF2_PORT" if os.environ.get("CRYOFM_HALF2_PORT") else "default (29501)"
+        
+        if configured_port:
+            # Set port (from env var or default)
+            if "MASTER_PORT" not in os.environ:
+                os.environ["MASTER_PORT"] = configured_port
+            if "ACCELERATE_MASTER_PORT" not in os.environ:
+                os.environ["ACCELERATE_MASTER_PORT"] = configured_port
+    
+    # Initialize accelerate state before using logger
+    # Use PartialState for lightweight initialization (sufficient for logging)
+    partial_state = PartialState()
+    
+    # Setup logging
+    setup_logging(args.log_file_path)
+    logger = get_logger(__name__)
+    
+    # Add main process filter to all logger handlers
+    # Use PartialState to determine if it's the main process (supports early logging and half2 branch)
+    # Note: get_logger() returns MultiProcessAdapter which doesn't have handlers attribute,
+    # so we only add filter to root handlers (setup_logging already adds handlers to root logger)
+    main_process_filter = MainProcessFilter(partial_state)
+    for handler in logging.root.handlers:
+        handler.addFilter(main_process_filter)
+    
+    # Log port configuration
+    if configured_port and port_source:
+        current_port = os.environ.get("MASTER_PORT", "not set")
+        if is_half1(starfile_path):
+            logger.info(f"Half1: Using port {current_port} (from {port_source})")
+        elif is_half2(starfile_path):
+            logger.info(f"Half2: Using port {current_port} (from {port_source})")
     
     # Determine if this is half1 or half2
     if is_half2(starfile_path):
@@ -340,6 +383,14 @@ def main():
         accelerator = accelerate.Accelerator()
         logger.info(f"Accelerator setup complete. Device: {accelerator.device}, Process: {accelerator.process_index}/{accelerator.num_processes}")
         
+        # Update filter to use accelerator (more accurate, supports is_main_process)
+        # Remove old filter and add new one
+        # Note: get_logger() returns MultiProcessAdapter which doesn't have handlers attribute,
+        # so we only update root handlers
+        for handler in logging.root.handlers:
+            handler.filters = [f for f in handler.filters if not isinstance(f, MainProcessFilter)]
+            handler.addFilter(MainProcessFilter(accelerator))
+        
         # Use file lock to prevent half2 from processing
         # The lock file is based on half2 path so half2 can detect it
         # This lock is held for the entire processing duration (24 hours timeout)
@@ -412,5 +463,140 @@ def main():
         )
 
 
+def launch_with_accelerate():
+    """
+    Launch this script with accelerate launch, automatically setting the port
+    based on half1/half2 detection and using all available GPUs.
+    """
+    # Find the starfile in arguments to determine half1/half2
+    starfile = None
+    for arg in sys.argv[1:]:
+        if arg.endswith('.star') and not arg.startswith('--'):
+            starfile = arg
+            break
+    
+    # Determine port based on half1/half2
+    if starfile:
+        if is_half1(starfile):
+            port = os.environ.get("CRYOFM_HALF1_PORT", "29500")
+            print(f"[relion_wrapper.py] Half1 detected: Using port {port}")
+        elif is_half2(starfile):
+            port = os.environ.get("CRYOFM_HALF2_PORT", "29501")
+            print(f"[relion_wrapper.py] Half2 detected: Using port {port}")
+        else:
+            port = os.environ.get("MASTER_PORT", "29500")
+            print(f"[relion_wrapper.py] Warning: Could not detect half1/half2, using port {port}")
+    else:
+        port = os.environ.get("MASTER_PORT", "29500")
+        print(f"[relion_wrapper.py] No starfile found, using port {port}")
+    
+    # Set environment variables for accelerate launch (as backup)
+    os.environ["MASTER_PORT"] = port
+    os.environ["ACCELERATE_MASTER_PORT"] = port
+    
+    # Parse arguments - extract accelerate launch specific options, pass rest to script
+    accelerate_args = []
+    script_args = []
+    skip_next = False
+    user_specified_port = False
+    
+    for i, arg in enumerate(sys.argv[1:], 1):
+        if skip_next:
+            skip_next = False
+            continue
+        
+        # Extract accelerate launch options
+        if arg == "--main_process_port" and i < len(sys.argv) - 1:
+            # User explicitly set port, use it instead of auto-detection
+            accelerate_args.extend(["--main_process_port", sys.argv[i + 1]])
+            skip_next = True
+            user_specified_port = True
+        elif arg.startswith("--main_process_port="):
+            accelerate_args.append(arg)
+            user_specified_port = True
+        elif arg.startswith("--num_processes") or arg == "--num_processes":
+            # Ignore num_processes - we'll use all GPUs automatically
+            if arg == "--num_processes" and i < len(sys.argv) - 1:
+                skip_next = True
+            # Don't add to accelerate_args or script_args
+        else:
+            # All other arguments go to the script
+            script_args.append(arg)
+    
+    # If user didn't specify port, add our auto-detected port to accelerate_args
+    if not user_specified_port:
+        accelerate_args.extend(["--main_process_port", port])
+    
+    # Build the command: accelerate launch [options] python relion_wrapper.py [script_args]
+    # Use __file__ to get the absolute path to this script
+    # Note: accelerate launch will automatically use all available GPUs if num_processes is not specified
+    # Find accelerate command - try to locate it in the Python environment
+    script_path = osp.abspath(__file__)
+    
+    # Try to find accelerate command
+    accelerate_cmd = None
+    
+    # Method 1: Try shutil.which to find accelerate in PATH
+    accelerate_cmd = shutil.which("accelerate")
+    
+    # Method 2: If not found, try in the same directory as Python executable
+    if not accelerate_cmd:
+        python_dir = osp.dirname(sys.executable)
+        possible_accelerate = osp.join(python_dir, "accelerate")
+        if osp.exists(possible_accelerate) and os.access(possible_accelerate, os.X_OK):
+            accelerate_cmd = possible_accelerate
+    
+    # Method 3: Try common conda/virtualenv locations
+    if not accelerate_cmd:
+        for base_dir in [sys.prefix, sys.exec_prefix]:
+            possible_accelerate = osp.join(base_dir, "bin", "accelerate")
+            if osp.exists(possible_accelerate) and os.access(possible_accelerate, os.X_OK):
+                accelerate_cmd = possible_accelerate
+                break
+    
+    if not accelerate_cmd:
+        raise RuntimeError(
+            "Could not find 'accelerate' command. Please ensure accelerate is installed "
+            "and available in PATH. You can install it with: pip install accelerate"
+        )
+    
+    # Verify accelerate command is executable
+    if not os.access(accelerate_cmd, os.X_OK):
+        raise RuntimeError(
+            f"Found accelerate command at {accelerate_cmd} but it is not executable. "
+            f"Please check the file permissions."
+        )
+    
+    # Build command: accelerate launch [accelerate_args] python script_path [script_args]
+    # Note: accelerate launch automatically detects where script args start
+    cmd = [accelerate_cmd, "launch"] + accelerate_args + [
+        script_path,
+    ] + script_args
+    
+    print(f"[relion_wrapper.py] Launching with all available GPUs")
+    print(f"[relion_wrapper.py] Accelerate command: {accelerate_cmd}")
+    print(f"[relion_wrapper.py] Port: {port}")
+    print(f"[relion_wrapper.py] Full command: {' '.join(cmd)}")
+    
+    # Execute accelerate launch
+    # Use shell=False to avoid shell interpretation issues
+    try:
+        sys.exit(subprocess.call(cmd, shell=False))
+    except FileNotFoundError as e:
+        raise RuntimeError(
+            f"Failed to execute accelerate command: {accelerate_cmd}\n"
+            f"Error: {e}\n"
+            f"Please ensure accelerate is properly installed: pip install accelerate"
+        ) from e
+
+
 if __name__ == "__main__":
-    main()
+    # Check if we're already running under accelerate launch
+    # If not, launch with accelerate (using all available GPUs). If yes, run main() directly.
+    if os.environ.get("LOCAL_RANK") is None and os.environ.get("RANK") is None:
+        # Not in accelerate launch yet - automatically launch with accelerate
+        # This will use all available GPUs automatically
+        launch_with_accelerate()
+    else:
+        # Already in accelerate launch, run main() directly
+        main()

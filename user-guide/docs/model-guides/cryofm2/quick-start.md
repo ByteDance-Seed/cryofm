@@ -114,7 +114,7 @@ MASK_MAP_PATH=solvent_mask.mrc
 export NCCL_DEBUG=ERROR
 export CONDA_ENV="cryofm"
 export CRYOFM_MODEL_DIR=/path/to/cryofm-v2/cryofm2-pretrain
-export RELION_EXTERNAL_RECONSTRUCT_EXECUTABLE="/path/to/bin/accelerate launch --num_processes 8 /path/to/cryofm/relion/relion_wrapper.py  --mask-path ${MASK_MAP_PATH} --op denoise inpaint --fmask-threshold 10 --threshold-res 10 --bbox --norm-grad --use-lamb-w --skip-spectral-trailing --spectral-mixing"
+export RELION_EXTERNAL_RECONSTRUCT_EXECUTABLE="/path/to/conda/envs/cryofm/bin/python /path/to/cryofm/relion/relion_wrapper.py --mask-path ${MASK_MAP_PATH} --bbox --op denoise inpaint --fmask-threshold 10 --threshold-res 10 --norm-grad --use-lamb-w --skip-spectral-trailing --spectral-mixing"
 
 cd ${EXP_DIR}
 mkdir -p ${OUTPUT_DIR}

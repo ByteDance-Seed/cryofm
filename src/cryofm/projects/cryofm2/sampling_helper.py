@@ -19,6 +19,7 @@ import glob
 import copy
 import math
 import random
+import logging
 import contextlib
 import os.path as osp
 from logging import getLogger
@@ -37,17 +38,13 @@ import einops
 import accelerate
 from accelerate.utils import broadcast_object_list
 
-from cryofm.core.fourier import (fourier_to_primal_3d, primal_to_fourier_3d, np_real_to_rft,
-                                 rfft3_freq_indices, fft3_freq_indices, shell_avg)
 from cryofm.core.utils.metrics import calc_fsc, plot_fsc
 from cryofm.core.utils.mask import create_sphere_mask
 from cryofm.core.utils.sampling_fm import sample_from_fm
 from cryofm.core.datasets.transforms.patchify import GridPatches3D, GridAggregator, CenterCrop3D
-from cryofm.core.training.accelerate_utils import setup_logging
-from cryofm.core.training.lightning_utils import autoload_model
 from cryofm.core.utils.shape_utils import get_bbox, bbox_crop, ensure_min_bbox_size, get_pad_width
-from cryofm.core.utils.ckpt_loading import get_ckpt_by_step
-from cryofm.core.utils.mrc_io import load_vol
+from cryofm.core.fourier import (fourier_to_primal_3d, primal_to_fourier_3d, np_real_to_rft, rfft3_freq_indices,
+                                 fft3_freq_indices, shell_avg)
 
 from cryofm.projects.cryofm2.utils.bp_reconstruct import BackprojectReconstruct
 from cryofm.projects.cryofm2.utils.infer_relion_utils import (
@@ -79,6 +76,22 @@ def change_dir(path):
         yield
     finally:
         os.chdir(old_dir)
+
+
+class MainProcessFilter(logging.Filter):
+    """Filter that only allows logs from the main process. Supports PartialState and Accelerator."""
+    def __init__(self, state):
+        super().__init__()
+        self.state = state
+    
+    def filter(self, record):
+        # Support PartialState and Accelerator, both have is_main_process attribute
+        if hasattr(self.state, 'is_main_process'):
+            return self.state.is_main_process
+        # Backward compatibility: if no is_main_process, check process_index
+        elif hasattr(self.state, 'process_index'):
+            return self.state.process_index == 0
+        return True
 
 
 # powered by LLM
