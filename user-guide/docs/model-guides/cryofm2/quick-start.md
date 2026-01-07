@@ -90,12 +90,7 @@ cfm denoise --num_processes 4 -i1 half_map_1.mrc -i2 half_map_2.mrc -o ./output 
     --op denoise --norm-grad --use-lamb-w
 ```
 
-The CLI commands automatically handle the accelerate multi-GPU setup when `--num_processes` is specified. For more advanced control, you can also use `accelerate launch` directly:
-
-```bash
-accelerate launch --num_processes 4 cfm denoise -i1 half_map_1.mrc -i2 half_map_2.mrc -o ./output \
-    --model-dir path/to/cryofm-v2/cryofm2-pretrain --op denoise
-```
+The CLI commands automatically handle the accelerate multi-GPU setup when `--num_processes` is specified.
 
 ### Use in RELION
 
