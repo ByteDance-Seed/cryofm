@@ -775,6 +775,13 @@
       word-break: break-word;
       overflow-wrap: break-word;
     }
+
+    /* Make all images responsive on mobile, matching video behavior */
+    .article-content img.img-small,
+    .article-content img.img-medium,
+    .article-content img.img-large {
+      max-width: 100%;
+    }
   }
 }
 

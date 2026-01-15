@@ -58,6 +58,7 @@ nav:
           - Downstream Tasks: model-guides/cryofm1/downstream-tasks.md
   - How-to Guides:
       - how-to/working-with-emdb.md
+      - how-to/working-with-cryo-em-software.md
   # - API Reference:
   #     - api-reference/commands.md
   # - Integration Guide:
