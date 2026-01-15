@@ -49,6 +49,7 @@ dependencies = [
     "wandb",
     "mmcv-lite",
     "matplotlib",
+    "huggingface_hub",
 ]
 
 [project.optional-dependencies]

@@ -5,7 +5,15 @@
 Before using CryoFM2, please ensure:
 
 1. **Install CryoFM**: Follow the [Installation Guide](../../getting-started/installation.md) to install `cryofm`.
-2. **Download Model Weights**: CryoFM2 model weights are available for download from [Hugging Face](https://huggingface.co/ByteDance-Seed/cryofm-v2).
+2. **Download Model Weights**: CryoFM2 model weights are available for download from [Hugging Face](https://huggingface.co/ByteDance-Seed/cryofm-v2). To download the model weights, first install the Hugging Face CLI tool:
+   ```bash
+   pip install huggingface_hub
+   ```
+   Then download all model files using:
+   ```bash
+   hf download ByteDance-Seed/cryofm-v2 --local-dir ./cryofm-v2
+   ```
+   This will download all necessary model files (including `cryofm2-pretrain`, `cryofm2-emhancer`, and `cryofm2-emready`) to the `./cryofm-v2` directory. You can change `./cryofm-v2` to your preferred download location.
 
 ## Generating Samples
 > Exploring Training Data Distribution

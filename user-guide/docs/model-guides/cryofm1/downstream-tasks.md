@@ -27,7 +27,15 @@ pip install .
 
 #### 2. Download model checkpoints and configuration files
 
-Download the CryoFM1 model weights and configuration files from the [Hugging Face repository](https://huggingface.co/ByteDance-Seed/cryofm-v1).
+CryoFM1 model weights and configuration files are available for download from the [Hugging Face repository](https://huggingface.co/ByteDance-Seed/cryofm-v1). To download the model weights, first install the Hugging Face CLI tool:
+```bash
+pip install huggingface-hub
+```
+Then download all model files using:
+```bash
+huggingface-cli download ByteDance-Seed/cryofm-v1 --local-dir ./cryofm-v1
+```
+This will download all necessary model files (including `cryofm-s` and `cryofm-l`) to the `./cryofm-v1` directory. You can change `./cryofm-v1` to your preferred download location.
 
 ---
 
