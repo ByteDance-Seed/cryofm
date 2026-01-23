@@ -135,3 +135,40 @@ if __name__ == "__main__":
 ```
 
 ---
+
+### CUDA Out of Memory (OOM)
+
+<div class="admonition info">
+  <p class="admonition-title"><strong>Question</strong></p>
+  <p>I encountered a CUDA out of memory (OOM) error. How can I fix it?</p>
+</div>
+
+GPU memory usage is mainly controlled by the `--batch-size` parameter. If you encounter OOM issues, please prioritize lowering the `--batch-size`. The default `--batch-size` for the `cfm` command is 4.
+
+Operations involving likelihood calculation require significant GPU memory. In contrast, `cfm enhance` on a single map without likelihood adjustment requires much less memory. The approximate GPU memory consumption is listed in the tables below for reference:
+
+**cfm denoise or cfm enhance (with likelihood)**
+
+| batch_size | --bf16 | GPU mem |
+| :--- | :--- | :--- |
+| 1 | no | 7.3G |
+| 2 | no | 13G |
+| 4 | no | 24G |
+| 1 | yes | 6.9G |
+| 2 | yes | 11G |
+| 4 | yes | 21G |
+
+**simple cfm enhance (without likelihood)**
+
+| batch_size | --bf16 | GPU mem |
+| :--- | :--- | :--- |
+| 1 | no | 4.1G |
+| 2 | no | 5.8G |
+| 4 | no | 9.1G |
+| 8 | no | 16G |
+| 1 | yes | 3.8G |
+| 2 | yes | 5G |
+| 4 | yes | 7.3G |
+| 8 | yes | 19.9G |
+
+---

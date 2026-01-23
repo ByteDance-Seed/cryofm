@@ -759,76 +759,80 @@ def build_target_energy_and_fsc_volume(
 def dps(cli_args, scheduler, unet, op, y, device, f_mask=None, ref_map=None, fsc_volume=None, vol_power=None,
         wt_sigma2=None):
     def _cond_v(x_t: torch.Tensor, t: torch.Tensor):
-        _t = t.item()
-        lamb_base = cli_args.lamb_base
-        if op != "inpaint":
-            x_t.requires_grad_(True)
-            if x_t.grad is not None:
-                x_t.grad.zero_()
-        # Current model can only handle channel=2, leave one value for future conversion to conditional model
-        input_x = torch.concat([x_t, torch.zeros_like(x_t)], dim=1)
+        with contextlib.ExitStack() as stack:
+            if cli_args.bf16:
+                stack.enter_context(torch.autocast(device.type, dtype=torch.bfloat16))
 
-        # Where the current model should go
-        v_t = unet(input_x, einops.repeat(t, "->b", b=len(x_t)).to(device)).sample
-        # One step to restore to final state
-        x_0_hat = x_t - v_t * t / scheduler.num_train_timesteps
-        # y is my condition
-        scaled_y = y
-        loss = None
+            _t = t.item()
+            lamb_base = cli_args.lamb_base
+            if op != "inpaint":
+                x_t.requires_grad_(True)
+                if x_t.grad is not None:
+                    x_t.grad.zero_()
+            # Current model can only handle channel=2, leave one value for future conversion to conditional model
+            input_x = torch.concat([x_t, torch.zeros_like(x_t)], dim=1)
 
-        f_x_0_hat = primal_to_fourier_3d(x_0_hat)
-        f_y_scale = primal_to_fourier_3d(scaled_y).to(device)
+            # Where the current model should go
+            v_t = unet(input_x, einops.repeat(t, "->b", b=len(x_t)).to(device)).sample
+            # One step to restore to final state
+            x_0_hat = x_t - v_t * t / scheduler.num_train_timesteps
+            # y is my condition
+            scaled_y = y
+            loss = None
 
-        if "inpaint" in op and "denoise" not in op:
-            # only inpaiting, loss is None. noise_power not needed.
-            f_x_0_hat = f_y_scale * (f_mask) + f_x_0_hat * (1 - f_mask)
-            x_0_hat = fourier_to_primal_3d(f_x_0_hat).real
-            cond_v_t = (x_t - x_0_hat) / (_t / scheduler.num_train_timesteps)
-        elif "denoise" in op and "inpaint" not in op:
-            # only denoising, no inpainting. f_mask not needed.
-            elem_err = F.mse_loss(
-                torch.view_as_real(f_x_0_hat),
-                torch.view_as_real(f_y_scale),
-                reduction='none'
-            )
-            sq_err = elem_err.mean(dim=-1)
-            target_energy = vol_power
-            fsc_safe = torch.clamp(fsc_volume, max=1.0 - EPS_FSC)
-            weight = 1 / (1 - fsc_safe) / (target_energy + 1e-6)
-            loss = (weight * sq_err).sum() / weight.sum()
-        elif "inpaint" in op and "denoise" in op:
-            # both inpaiting and denoise.
-            f_x_0_hat = f_x_0_hat * f_mask
-            elem_err = F.mse_loss(
-                torch.view_as_real(f_x_0_hat),
-                torch.view_as_real(f_y_scale),
-                reduction='none'
-            )
-            sq_err = elem_err.mean(dim=-1)
-            target_energy = vol_power
-            fsc_safe = torch.clamp(fsc_volume, max=1.0 - EPS_FSC)
-            weight = 1 / (1 - fsc_safe) / (target_energy + 1e-6)
-            loss = (weight * sq_err).sum() / weight.sum()
-        elif "non-uniform" in op:
-            # real space non-uniform variance operator.
-            wt_x_0_hat = shannon_wavelet_transform_3d(x_0_hat, n_bands=cli_args.nbands)
-            wt_y = shannon_wavelet_transform_3d(scaled_y.to(device), n_bands=cli_args.nbands)
-            err2 = (wt_x_0_hat - wt_y).pow(2)  # [N,C,D,H,W]
-            weight = 1 / (wt_sigma2 + 1e-6)
-            # weight = wt_sigma2
-            # weight = 1 / (1 - wt_sigma2 + 1e-6)
-            loss = (weight * err2).sum() / weight.sum()
-        if loss is not None:
-            loss_grad = torch.autograd.grad(outputs=loss, inputs=x_t, allow_unused=True, materialize_grads=True)[0]
-            if cli_args.use_lamb_w:
-                lamb_w = min(_t / max(.001, 1000 - _t), cli_args.lamb_w_max)
-            else:
-                lamb_w = 1.0
-            if cli_args.norm_grad:
-                cond_v_t = v_t + lamb_w * lamb_base * loss_grad / loss_grad.norm()
-            else:
-                cond_v_t = v_t + lamb_w * lamb_base * loss_grad
-        cond_v_t = cond_v_t.detach()
+            f_x_0_hat = primal_to_fourier_3d(x_0_hat)
+            f_y_scale = primal_to_fourier_3d(scaled_y).to(device)
+
+            if "inpaint" in op and "denoise" not in op:
+                # only inpaiting, loss is None. noise_power not needed.
+                f_x_0_hat = f_y_scale * (f_mask) + f_x_0_hat * (1 - f_mask)
+                x_0_hat = fourier_to_primal_3d(f_x_0_hat).real
+                cond_v_t = (x_t - x_0_hat) / (_t / scheduler.num_train_timesteps)
+            elif "denoise" in op and "inpaint" not in op:
+                # only denoising, no inpainting. f_mask not needed.
+                elem_err = F.mse_loss(
+                    torch.view_as_real(f_x_0_hat),
+                    torch.view_as_real(f_y_scale),
+                    reduction='none'
+                )
+                sq_err = elem_err.mean(dim=-1)
+                target_energy = vol_power
+                fsc_safe = torch.clamp(fsc_volume, max=1.0 - EPS_FSC)
+                weight = 1 / (1 - fsc_safe) / (target_energy + 1e-6)
+                loss = (weight * sq_err).sum() / weight.sum()
+            elif "inpaint" in op and "denoise" in op:
+                # both inpaiting and denoise.
+                f_x_0_hat = f_x_0_hat * f_mask
+                elem_err = F.mse_loss(
+                    torch.view_as_real(f_x_0_hat),
+                    torch.view_as_real(f_y_scale),
+                    reduction='none'
+                )
+                sq_err = elem_err.mean(dim=-1)
+                target_energy = vol_power
+                fsc_safe = torch.clamp(fsc_volume, max=1.0 - EPS_FSC)
+                weight = 1 / (1 - fsc_safe) / (target_energy + 1e-6)
+                loss = (weight * sq_err).sum() / weight.sum()
+            elif "non-uniform" in op:
+                # real space non-uniform variance operator.
+                wt_x_0_hat = shannon_wavelet_transform_3d(x_0_hat, n_bands=cli_args.nbands)
+                wt_y = shannon_wavelet_transform_3d(scaled_y.to(device), n_bands=cli_args.nbands)
+                err2 = (wt_x_0_hat - wt_y).pow(2)  # [N,C,D,H,W]
+                weight = 1 / (wt_sigma2 + 1e-6)
+                # weight = wt_sigma2
+                # weight = 1 / (1 - wt_sigma2 + 1e-6)
+                loss = (weight * err2).sum() / weight.sum()
+            if loss is not None:
+                loss_grad = torch.autograd.grad(outputs=loss, inputs=x_t, allow_unused=True, materialize_grads=True)[0]
+                if cli_args.use_lamb_w:
+                    lamb_w = min(_t / max(.001, 1000 - _t), cli_args.lamb_w_max)
+                else:
+                    lamb_w = 1.0
+                if cli_args.norm_grad:
+                    cond_v_t = v_t + lamb_w * lamb_base * loss_grad / loss_grad.norm()
+                else:
+                    cond_v_t = v_t + lamb_w * lamb_base * loss_grad
+            cond_v_t = cond_v_t.detach()
         return cond_v_t
 
     # Ablation: Number of time steps
