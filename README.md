@@ -58,6 +58,8 @@ We are extremely delighted to release **CryoFM**, a flow-based foundation model 
 
 ### Installation
 
+CryoFM was developed and tested on Debian GNU/Linux 11 (bullseye). GPU is required; we have tested on both NVIDIA V100 and A100 GPUs. The installation usually takes a few minutes.
+
 ```bash
 # Clone the repository
 git clone https://github.com/ByteDance-Seed/cryofm.git
@@ -100,6 +102,8 @@ cfm enhance -i input_map.mrc -o ./output_emhancer \
 cfm enhance -i input_map.mrc -o ./output_emready \
     --model-dir path/to/cryofm-v2/cryofm2-emready --output-tag 0 --cfg-weight 0.5
 ```
+
+As a reference, processing six 64³ patches with a batch size of 6 takes ~44 seconds on a single NVIDIA V100 GPU. Runtime scales with the input map size: larger maps are split into more patches and therefore take proportionally longer.
 
 For more examples and advanced options, refer to the [CryoFM2 Quick Start Guide](https://bytedance-seed.github.io/cryofm/docs/model-guides/cryofm2/quick-start.html).
 
