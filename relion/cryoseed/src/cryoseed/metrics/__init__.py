@@ -1,0 +1,23 @@
+from __future__ import annotations
+
+import importlib
+from typing import Any
+
+__all__ = [
+    "fsc",
+]
+
+_SUBMODULES = {"fsc"}
+
+
+def __getattr__(name: str) -> Any:
+    if name in _SUBMODULES:
+        module = importlib.import_module(f"{__name__}.{name}")
+        globals()[name] = module
+        return module
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals().keys()) | set(__all__))

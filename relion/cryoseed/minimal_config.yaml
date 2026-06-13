@@ -1,0 +1,7 @@
+io:
+  star_path: path/to/particles.star
+  data_path: path/to/particle_stack_dir
+  ref_volume_path: path/to/reference_volume.mrc
+
+data:
+  particle_diameter: 200

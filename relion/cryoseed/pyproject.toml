@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cryoseed"
+dynamic = ["version"]
+description = "Cryo-EM reconstruction toolkit"
+requires-python = ">=3.10"
+
+[project.scripts]
+cryoseed = "cryoseed.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.dynamic]
+version = { attr = "cryoseed._version.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]

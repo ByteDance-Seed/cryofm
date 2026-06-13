@@ -1,0 +1,75 @@
+io:
+  star_path: ""
+  data_path: ""
+  ref_volume_path: ""
+  output_path: outputs
+  ssd_cache_root: ""
+
+data:
+  batch_size: 4
+  num_workers: 0
+  num_particles: 0
+  image_size: 0
+  angpix: 0.0
+  particle_diameter: null
+  default_optic_params:
+    kV: null
+    Cs: null
+    Bfac: null
+    scale: null
+    Q0: null
+    phase_shift: null
+  default_particle_params:
+    DeltafU: null
+    DeltafV: null
+    azimuthal_angle: null
+
+logging:
+  log_dir: ""
+  log_prefix: cryoseed
+
+reconstruction:
+  num_volumes: 1
+  requires_grad: false
+  requires_accum: true
+  backproject_chunk: 65536
+  accumulate_chunk: 65536
+
+statistics:
+  use_noise: true
+  use_prior: false
+  init_variance: 1.0
+  precision_eps: 1.0e-6
+  tail_floor: 1.0e-5
+  init_lowpass_cutoff: null
+
+refinement:
+  num_epochs: 15
+  fsc_threshold: 0.143
+  init_lowpass_angstrom: 30
+
+scheduler:
+  confidence_threshold: 0.1
+  increase_radius_step: 10
+  increase_radius_aggressive_factor: 0.25
+  base_healpix_order: 2
+  auto_local_healpix_order: 4
+  use_cache: false
+  cache_max_healpix_order: 4
+  ssd_cache_min_side_length: 150
+
+pose_search:
+  init_healpix_order: 2
+  k_steps: 2
+  t_extent: 35
+  t_ngrid: 7
+  t_xshift: 0
+  t_yshift: 0
+  pose_chunk_factor: 2560
+  max_candidates: 100
+  mse_chunk: 8192
+  candidate_select_threshold: 0.9999
+
+reproduce:
+  seed: 42
+  deterministic: false
