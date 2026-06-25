@@ -288,17 +288,21 @@ class HomoRefineEngine(torch.nn.Module):
         self.state.progress.epoch = int(next_epoch)
         self.state.progress.half = 0
 
-        for key in (
+        required_schedule_keys = (
             "pose_search_scope",
             "pose_search_strategy",
             "healpix_order",
             "oversampling",
             "side_length",
+            "trans_grid_extent",
             "proj_cache_backend",
-        ):
+        )
+        for key in required_schedule_keys:
             if key not in next_schedule:
                 raise ValueError(f"Checkpoint `next_schedule` is missing `{key}`.")
             setattr(self.state.schedule, key, next_schedule[key])
+        if "full_backprojection" in next_schedule:
+            self.state.schedule.full_backprojection = bool(next_schedule["full_backprojection"])
 
         self.state.metrics.confidence_sum = 0.0
         self.state.metrics.confidence_count = 0
@@ -310,6 +314,10 @@ class HomoRefineEngine(torch.nn.Module):
         # State
         init_side_length = 2 * int(self.config.data.image_size * self.config.data.angpix / self.config.refinement.init_lowpass_angstrom)
         self.state.schedule.side_length = init_side_length
+        self.state.schedule.full_backprojection = (
+            bool(self.config.reconstruction.full_backprojection)
+            or int(self.config.refinement.num_epochs) <= 1
+        )
 
         # Volume
         with mrcfile.open(self.config.io.ref_volume_path, permissive=True) as mrc:
@@ -355,6 +363,11 @@ class HomoRefineEngine(torch.nn.Module):
             self.config.refinement.fsc_threshold,
             self.config.data.angpix,
         )
+        prev_fsc_resolution = self.state.metrics.fsc_resolution
+        if prev_fsc_resolution is None:
+            fsc_resolution_change = None
+        else:
+            fsc_resolution_change = float(fsc_resol) - float(prev_fsc_resolution)
 
         self.state.metrics.fsc_scores = torch.as_tensor(
             fsc_scores_np,
@@ -362,6 +375,11 @@ class HomoRefineEngine(torch.nn.Module):
             device=self.device,
         )
         self.state.metrics.fsc_resolution = float(fsc_resol)
+        self.state.metrics.fsc_resolution_change = fsc_resolution_change
+        self.state.metrics.trans_update_rms = 0.5 * (
+            float(self.pose_half0.trans_update_rms.item())
+            + float(self.pose_half1.trans_update_rms.item())
+        )
 
         epoch = self.state.progress.epoch
         output_fsc_path = os.path.join(self.config.io.output_path, "fsc", f"epoch_{epoch:03d}")
@@ -597,7 +615,9 @@ class HomoRefineEngine(torch.nn.Module):
                 "healpix_order": self.state.schedule.healpix_order,
                 "oversampling": self.state.schedule.oversampling,
                 "side_length": self.state.schedule.side_length,
+                "trans_grid_extent": self.state.schedule.trans_grid_extent,
                 "proj_cache_backend": self.state.schedule.proj_cache_backend,
+                "full_backprojection": self.state.schedule.full_backprojection,
             }
         }
 
@@ -779,21 +799,35 @@ class HomoRefineEngine(torch.nn.Module):
                         logger,
                         title=f"Epoch {epoch} Summary",
                         lines=[
-                            f"Pose Search : L={self.state.schedule.side_length}, healpix={self.state.schedule.healpix_order}, oversampling={self.state.schedule.oversampling}",
+                            f"Pose Search : L={self.state.schedule.side_length}, healpix={self.state.schedule.healpix_order}, oversampling={self.state.schedule.oversampling}, trans_extent={self.state.schedule.trans_grid_extent:.2f}",
+                            f"Backproject : full_bp={self.state.schedule.full_backprojection}",
                             f"Resolution  : {float(self.state.metrics.fsc_resolution):.2f} Angstrom",
+                            f"Trans RMS   : {self.state.metrics.trans_update_rms:.2e}",
                             f"Confidence  : {self.state.metrics.avg_confidence:.2e}",
                         ],
                     )
 
                 self.scheduler.step()
 
+                if self.state.progress.has_converged and is_rank0():
+                    log_block(
+                        logger,
+                        title=f"Converged At Epoch {epoch}",
+                        lines=[
+                            "fsc_resolution has shown no meaningful gain for "
+                            f"{self.state.progress.num_epochs_without_resolution_gain} consecutive epochs "
+                            f"(resolution={float(self.state.metrics.fsc_resolution):.4f} A)",
+                        ],
+                    )
+
                 # next epoch plan
-                if is_rank0():
+                if is_rank0() and not self.state.progress.has_converged:
                     log_block(
                         logger,
                         title=f"Next Epoch Configuration (Epoch {epoch+1})",
                         lines=[
-                            f"Pose Search : L={self.state.schedule.side_length}, healpix={self.state.schedule.healpix_order}, oversampling={self.state.schedule.oversampling}",
+                            f"Pose Search : L={self.state.schedule.side_length}, healpix={self.state.schedule.healpix_order}, oversampling={self.state.schedule.oversampling}, trans_extent={self.state.schedule.trans_grid_extent:.2f}",
+                            f"Backproject : full_bp={self.state.schedule.full_backprojection}",
                             f"Scope       : {self.state.schedule.pose_search_scope}",
                             f"Strategy    : {self.state.schedule.pose_search_strategy}",
                             f"Cache       : {self.state.schedule.proj_cache_backend}",
@@ -821,6 +855,26 @@ class HomoRefineEngine(torch.nn.Module):
                     half1_wall,
                 )
 
+                if self.state.progress.has_converged:
+                    logger.info(
+                        "Refinement stopped early at epoch %d | reason=%s",
+                        epoch,
+                        "fsc_resolution has shown no meaningful gain for "
+                        f"{self.state.progress.num_epochs_without_resolution_gain} consecutive epochs "
+                        f"(resolution={float(self.state.metrics.fsc_resolution):.4f} A)",
+                    )
+                    break
+
+            if not self.state.progress.has_converged and is_rank0():
+                log_block(
+                    logger,
+                    title="Refinement Completed",
+                    lines=[
+                        f"Completed all {int(self.config.refinement.num_epochs)} epochs",
+                        f"Final resolution : {float(self.state.metrics.fsc_resolution):.4f} Angstrom",
+                    ],
+                )
+
         except Exception:
-            logger.exception("Training failed")
+            logger.exception("Refinement failed")
             raise

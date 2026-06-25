@@ -10,7 +10,7 @@ from cryoseed.config import MainConfig
 from cryoseed.utils.torch_utils import _norm_device
 from cryoseed.fft.fft_torch import primal_to_fourier_2d
 from cryoseed.ops.radial import radial_average, radial_broadcast
-from cryoseed.ops.transforms import translate_image
+from cryoseed.ops.transforms import downsample2d, translate_image
 from cryoseed.modules.volume import Volume
 
 __all__ = [
@@ -112,9 +112,11 @@ class NoiseVariance(nn.Module):
             torch.zeros_like(self.variance),
             persistent=False,
         )
+        # Per-bin denominators let low-resolution updates touch only a prefix of bins
+        # without zeroing higher-frequency variance on update().
         self.register_buffer(
             "accum_denom",
-            torch.tensor([0.0], dtype=torch.float32, device=dev),
+            torch.zeros_like(self.variance),
             persistent=False,
         )
 
@@ -244,7 +246,66 @@ class NoiseVariance(nn.Module):
         )
 
     @torch.no_grad()
-    def accumulate(
+    def _accumulate_from_precomputed_radial_residual_power(
+        self,
+        probability: Tensor,
+        image_index: torch.LongTensor,
+        radial_residual_power: Tensor,
+        *,
+        num_images: int,
+    ) -> None:
+        if not self.requires_accum:
+            return
+
+        if radial_residual_power.dim() != 2:
+            raise ValueError(
+                f"radial_residual_power must be 2D with shape (N,R), got {tuple(radial_residual_power.shape)}"
+            )
+
+        N = int(image_index.numel())
+        if probability.shape != (N,):
+            raise ValueError(f"probability must be (N,)=({N},), got {tuple(probability.shape)}")
+        if radial_residual_power.shape[0] != N:
+            raise ValueError(
+                "radial_residual_power must have the same leading dimension as image_index"
+            )
+        if num_images <= 0:
+            raise ValueError(f"num_images must be > 0, got {num_images}")
+
+        num_bins = int(radial_residual_power.shape[1])
+        if not (0 < num_bins <= self.num_radial_bins):
+            raise ValueError(
+                f"radial_residual_power.shape[1] must be in [1, {self.num_radial_bins}], got {num_bins}"
+            )
+
+        noise_var_per_img = torch.zeros(
+            (num_images, self.num_radial_bins),
+            device=self.device,
+            dtype=torch.float32,
+        )
+
+        accum_chunk = int(self.accumulate_chunk)
+        for chunk_start in range(0, N, accum_chunk):
+            chunk_end = min(chunk_start + accum_chunk, N)
+            prob = probability[chunk_start:chunk_end].to(device=self.device, dtype=torch.float32)
+            img_idx = image_index[chunk_start:chunk_end].to(device=self.device, dtype=torch.long)
+            residual = radial_residual_power[chunk_start:chunk_end].to(
+                device=self.device,
+                dtype=torch.float32,
+            )
+            num_bins = int(residual.shape[1])
+            noise_var_per_pose = 0.5 * prob.view(-1, 1) * residual
+            noise_var_per_img[:, :num_bins].scatter_add_(
+                0,
+                img_idx.view(-1, 1).expand(-1, num_bins),
+                noise_var_per_pose,
+            )
+
+        self.accum_numer += noise_var_per_img.sum(dim=0).to(self.accum_numer.dtype)
+        self.accum_denom[:num_bins] += float(num_images)
+
+    @torch.no_grad()
+    def _accumulate_from_observations(
         self,
         image: Tensor,
         ctf: Tensor | None,
@@ -254,36 +315,19 @@ class NoiseVariance(nn.Module):
         volume_index: torch.LongTensor,
         rotation: Tensor,
         translation: Tensor,
+        *,
+        side_length: int | None,
     ) -> None:
-        """Accumulate a weighted residual-based estimate of the noise variance.
-
-        This computes (per pose hypothesis) the squared residual in Fourier space:
-
-        ``|proj(volume, R) - translate(image, t)|^2``
-
-        and accumulates a probability-weighted radial average into internal
-        numerator/denominator buffers for later normalization by :meth:`update`.
-
-        Args:
-            image: Fourier-domain images with shape ``(B, D, D)``.
-            ctf: Optional CTF with shape ``(B, D, D)``.
-            volume: Volume module exposing ``project(rotation, side_length=...)``.
-            image_index: Pose-to-image mapping with shape ``(N,)``.
-            volume_index: Pose-to-volume mapping with shape ``(N,)``.
-            rotation: Rotation matrices with shape ``(N, 3, 3)``.
-            translation: Translations with shape ``(N, 2)`` in pixels.
-            probability: Per-pose weights with shape ``(N,)``.
-        """
-        if not self.requires_accum:
-            return
-
         if image.dim() != 3 or image.shape[1] != image.shape[2]:
             raise ValueError(f"image must be (B,D,D), got {tuple(image.shape)}")
 
         B = int(image.shape[0])
         D = int(image.shape[1])
+        L = D if side_length is None else int(side_length)
         if D != int(self.image_size):
             raise ValueError(f"image side length {D} does not match image_size {int(self.image_size)}")
+        if not (0 < L <= D):
+            raise ValueError(f"side_length must be in [1, {D}], got {L}")
 
         N = int(image_index.numel())
         if volume_index.numel() != N:
@@ -295,8 +339,19 @@ class NoiseVariance(nn.Module):
         if probability.shape != (N,):
             raise ValueError(f"probability must be (N,)=({N},), got {tuple(probability.shape)}")
 
-        if ctf is not None and ctf.shape != image.shape:
-            raise ValueError(f"ctf must have the same shape as image (B,D,D), got {tuple(ctf.shape)}")
+        if ctf is not None:
+            if ctf.ndim != 3:
+                raise ValueError(f"ctf must be 3D with shape (B,D,D) or (B,L,L), got {tuple(ctf.shape)}")
+            if int(ctf.shape[0]) != B:
+                raise ValueError(
+                    f"ctf batch must match image batch: expected B={B}, got ctf.shape[0]={int(ctf.shape[0])} "
+                    f"with full shape {tuple(ctf.shape)}"
+                )
+            ctf_side = int(ctf.shape[-1])
+            if int(ctf.shape[-2]) != ctf_side or ctf_side not in (D, L):
+                raise ValueError(
+                    f"ctf must have shape (B,{D},{D}) or (B,{L},{L}), got {tuple(ctf.shape)}"
+                )
 
         noise_var_per_img = torch.zeros(
             (B, self.num_radial_bins),
@@ -320,26 +375,114 @@ class NoiseVariance(nn.Module):
 
             img_pose = image[img_idx]
             trans_image = translate_image(img_pose, trans)
+            if L != D:
+                trans_image = downsample2d(trans_image, L)
 
             rot_kq = rot.view(1, chunk_size, 3, 3).expand(K, -1, -1, -1).contiguous()
-            proj_all = volume.project(rot_kq, side_length=D)
+            proj_all = volume.project(rot_kq, side_length=L)
             proj_image = proj_all[vol_idx, torch.arange(chunk_size, device=device)]
 
             if ctf is not None:
-                proj_image = proj_image * ctf[img_idx]
+                ctf_pose = ctf[img_idx]
+                if int(ctf_pose.shape[-1]) != L:
+                    ctf_pose = downsample2d(ctf_pose, L)
+                proj_image = proj_image * ctf_pose
 
-            err2 = (proj_image - trans_image).abs().square()
-            err2_1d = radial_average(err2, max_radius=D // 2, ndim=2, use_cache=True)
-            noise_var_per_pose = 0.5 * prob.view(-1, 1) * err2_1d
-
-            noise_var_per_img.scatter_add_(
+            residual_power = (proj_image - trans_image).abs().square()
+            radial_residual_power = radial_average(
+                residual_power,
+                max_radius=L // 2,
+                ndim=2,
+                use_cache=True,
+            )
+            noise_var_per_pose = 0.5 * prob.view(-1, 1) * radial_residual_power
+            noise_var_per_img[:, : L // 2 + 1].scatter_add_(
                 0,
-                img_idx.view(chunk_size, 1).expand(-1, self.num_radial_bins),
+                img_idx.view(-1, 1).expand(-1, L // 2 + 1),
                 noise_var_per_pose,
             )
 
         self.accum_numer += noise_var_per_img.sum(dim=0).to(self.accum_numer.dtype)
-        self.accum_denom += B
+        self.accum_denom[: L // 2 + 1] += float(B)
+
+    @torch.no_grad()
+    def accumulate(
+        self,
+        image: Tensor | None = None,
+        ctf: Tensor | None = None,
+        volume: Volume | None = None,
+        probability: Tensor | None = None,
+        image_index: torch.LongTensor | None = None,
+        volume_index: torch.LongTensor | None = None,
+        rotation: Tensor | None = None,
+        translation: Tensor | None = None,
+        *,
+        radial_residual_power: Tensor | None = None,
+        num_images: int | None = None,
+        side_length: int | None = None,
+    ) -> None:
+        """Accumulate a weighted residual-based estimate of the noise variance.
+
+        Two input modes are supported:
+
+        - Self-contained mode: compute residuals from ``image/ctf/volume/rotation/translation`` via
+          ``|proj(volume, R; L) - translate(image, t; L)|^2`` and then take a radial average on
+          radii ``0..L//2``.
+        - Precomputed mode: consume ``radial_residual_power`` directly.
+
+        In both cases this accumulates a probability-weighted radial average into internal
+        numerator/denominator buffers for later normalization by :meth:`update`.
+
+        Args:
+            image: Fourier-domain images with shape ``(B, D, D)``.
+            ctf: Optional CTF with shape ``(B, D, D)`` or ``(B, L, L)``.
+            volume: Volume module exposing ``project(rotation, side_length=...)``.
+            image_index: Pose-to-image mapping with shape ``(N,)``.
+            volume_index: Pose-to-volume mapping with shape ``(N,)``.
+            rotation: Rotation matrices with shape ``(N, 3, 3)``.
+            translation: Translations with shape ``(N, 2)`` in pixels.
+            probability: Per-pose weights with shape ``(N,)``.
+            radial_residual_power: Optional precomputed radial residual power with
+                shape ``(N, R)`` where ``R <= image_size // 2 + 1``.
+            num_images: Required when ``radial_residual_power`` is provided.
+            side_length: Frequency window side length ``L`` used by the self-contained mode.
+                Defaults to ``image.shape[-1]``.
+        """
+        if not self.requires_accum:
+            return
+
+        if radial_residual_power is not None:
+            if probability is None or image_index is None or num_images is None:
+                raise ValueError(
+                    "probability, image_index, and num_images are required when radial_residual_power is provided"
+                )
+            self._accumulate_from_precomputed_radial_residual_power(
+                probability,
+                image_index,
+                radial_residual_power,
+                num_images=int(num_images),
+            )
+            return
+
+        if image is None or volume is None or probability is None or image_index is None:
+            raise ValueError(
+                "image, volume, probability, and image_index are required when radial_residual_power is not provided"
+            )
+        if volume_index is None or rotation is None or translation is None:
+            raise ValueError(
+                "volume_index, rotation, and translation are required when radial_residual_power is not provided"
+            )
+        self._accumulate_from_observations(
+            image,
+            ctf,
+            volume,
+            probability,
+            image_index,
+            volume_index,
+            rotation,
+            translation,
+            side_length=side_length,
+        )
 
     @torch.no_grad()
     def zero_accum(self, *, set_to_none: bool = False) -> None:
@@ -359,8 +502,8 @@ class NoiseVariance(nn.Module):
 
         if self.accum_numer is None or self.accum_numer.shape != self.variance.shape:
             self.accum_numer = torch.zeros_like(self.variance, dtype=torch.float32)
-        if self.accum_denom is None or self.accum_denom.numel() != 1:
-            self.accum_denom = torch.tensor([0.0], dtype=torch.float32, device=self.device)
+        if self.accum_denom is None or self.accum_denom.shape != self.variance.shape:
+            self.accum_denom = torch.zeros_like(self.variance, dtype=torch.float32)
 
         self.accum_numer.zero_()
         self.accum_denom.zero_()
@@ -410,6 +553,6 @@ class NoiseVariance(nn.Module):
                     group=group,
                 )
 
-        self.variance.zero_()
-        if denom.item() > 0:
-            torch.div(numer, denom, out=self.variance)
+        valid = denom > 0
+        if valid.any():
+            self.variance[valid] = numer[valid] / denom[valid]

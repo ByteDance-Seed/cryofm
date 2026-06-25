@@ -17,6 +17,7 @@ class EMInferResult(SolverInferResult):
     prob2vol_idx: torch.Tensor
     rotmat: torch.Tensor
     trans: torch.Tensor
+    radial_residual_power: torch.Tensor | None = None
 
 class EMSolver(Solver):
     def __init__(self, *, state: OptimState, pose_searcher: PoseSearcher, prior: PriorVariance | None = None):
@@ -31,12 +32,28 @@ class EMSolver(Solver):
         self.pose_searcher.refresh()
 
     def expectation(self, image, *, particle_index, ctf=None):
-        prob, prob2img_idx, prob2vol_idx, rotmat, trans = self.pose_searcher.search(image, particle_index=particle_index, ctf=ctf)
-        return prob, prob2img_idx, prob2vol_idx, rotmat, trans
+        prob, prob2img_idx, prob2vol_idx, rotmat, trans, sel_radial_residual_power = self.pose_searcher.search(
+            image,
+            particle_index=particle_index,
+            ctf=ctf,
+        )
+        radial_residual_power = sel_radial_residual_power
+        return prob, prob2img_idx, prob2vol_idx, rotmat, trans, radial_residual_power
 
-    def maximization(self, image, ctf=None, *, prob, prob2img_idx, prob2vol_idx, rotmat, trans):
+    def maximization(
+        self,
+        image,
+        ctf=None,
+        *,
+        prob,
+        prob2img_idx,
+        prob2vol_idx,
+        rotmat,
+        trans,
+        radial_residual_power=None,
+    ):
         radius = None
-        if not self.pose_searcher.config.reconstruction.full_backprojection:
+        if not self.state.schedule.full_backprojection:
             radius = int(self.state.schedule.side_length) // 2
         if self.noise is not None:
             noise_spectrum = self.noise.variance_spectrum(ndim=2)
@@ -54,7 +71,25 @@ class EMSolver(Solver):
             radius=radius,
         )
         if self.noise is not None:
-            self.noise.accumulate(image, ctf, self.volume, prob, prob2img_idx, prob2vol_idx, rotmat, trans)
+            if radial_residual_power is not None:
+                self.noise.accumulate(
+                    probability=prob,
+                    image_index=prob2img_idx,
+                    radial_residual_power=radial_residual_power,
+                    num_images=int(image.shape[0]),
+                )
+            else:
+                self.noise.accumulate(
+                    image,
+                    ctf,
+                    self.volume,
+                    prob,
+                    prob2img_idx,
+                    prob2vol_idx,
+                    rotmat,
+                    trans,
+                    side_length=int(self.state.schedule.side_length),
+                )
 
     def accumulate_metrics(self, result: EMInferResult):
         prob, prob2img_idx = result.prob, result.prob2img_idx
@@ -72,8 +107,21 @@ class EMSolver(Solver):
         particle_index = batch.particle_index
         ctf = batch.ctf
 
-        prob, prob2img_idx, prob2vol_idx, rotmat, trans = self.expectation(image, particle_index=particle_index, ctf=ctf)
-        result = EMInferResult(image=image, ctf=ctf, prob=prob, prob2img_idx=prob2img_idx, prob2vol_idx=prob2vol_idx, rotmat=rotmat, trans=trans)
+        prob, prob2img_idx, prob2vol_idx, rotmat, trans, radial_residual_power = self.expectation(
+            image,
+            particle_index=particle_index,
+            ctf=ctf,
+        )
+        result = EMInferResult(
+            image=image,
+            ctf=ctf,
+            prob=prob,
+            prob2img_idx=prob2img_idx,
+            prob2vol_idx=prob2vol_idx,
+            rotmat=rotmat,
+            trans=trans,
+            radial_residual_power=radial_residual_power,
+        )
         return result
 
     def accumulate(self, result: EMInferResult):
@@ -85,6 +133,7 @@ class EMSolver(Solver):
             prob2vol_idx=result.prob2vol_idx,
             rotmat=result.rotmat,
             trans=result.trans,
+            radial_residual_power=result.radial_residual_power,
         )
         self.accumulate_metrics(result)
 

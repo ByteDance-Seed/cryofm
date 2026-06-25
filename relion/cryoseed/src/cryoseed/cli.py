@@ -62,11 +62,13 @@ _FIELD_HELP: dict[tuple[str, str], str] = {
     ("data", "particle_diameter"): "Particle diameter in Angstrom; required for frequency marching.",
     ("data", "default_optic_params"): (
         "Fallback optics-level CTF fields as a JSON object string, e.g. "
-        "'{\"kV\":300,\"Cs\":2.7,\"Bfac\":0,\"scale\":1,\"Q0\":0.1,\"phase_shift\":0}'."
+        "'{\"voltage_kv\":300,\"spherical_aberration_mm\":2.7,\"bfactor\":0,"
+        "\"ctf_scale\":1,\"amplitude_contrast\":0.1,\"phase_shift_deg\":0}'."
     ),
     ("data", "default_particle_params"): (
         "Fallback particle-level CTF fields as a JSON object string, e.g. "
-        "'{\"DeltafU\":10000,\"DeltafV\":10000,\"azimuthal_angle\":0}'."
+        "'{\"defocus_u_angstrom\":10000,\"defocus_v_angstrom\":10000,"
+        "\"defocus_angle_deg\":0}'."
     ),
 
     ("logging", "log_dir"): "Log directory (default: output_path/logs).",
@@ -92,6 +94,9 @@ _FIELD_HELP: dict[tuple[str, str], str] = {
     ("refinement", "init_lowpass_angstrom"): "Initial low-pass resolution (Angstrom) for setting side_length.",
 
     ("scheduler", "confidence_threshold"): "avg_confidence threshold for aggressive side_length growth.",
+    ("scheduler", "fsc_resolution_patience"): "Number of consecutive epochs without meaningful FSC-resolution gain before declaring convergence.",
+    ("scheduler", "fsc_resolution_improvement_threshold"): "Minimum FSC-resolution improvement (Angstrom) required to reset the no-gain counter.",
+    ("scheduler", "fsc_resolution_rebound_threshold"): "Maximum FSC-resolution rebound (Angstrom) still treated as no meaningful gain.",
     ("scheduler", "increase_radius_step"): "Default radius increment in frequency marching (pixels).",
     ("scheduler", "increase_radius_aggressive_factor"): "Extra radius increment factor when confident.",
     ("scheduler", "base_healpix_order"): (
@@ -103,15 +108,16 @@ _FIELD_HELP: dict[tuple[str, str], str] = {
     ("scheduler", "use_cache"): "Enable projection cache (memory/SSD) for pose search.",
     ("scheduler", "cache_max_healpix_order"): "Enable caching only when healpix_order <= this value.",
     ("scheduler", "ssd_cache_min_side_length"): "Use SSD cache when side_length >= this value; otherwise memory cache.",
+    ("scheduler", "trans_extent_scale"): "Update trans_grid_extent to this factor times trans_update_rms.",
 
     ("pose_search", "init_healpix_order"): "Initial HEALPix order.",
-    ("pose_search", "k_steps"): "Local neighborhood radius k (controls (2k+1)^3 / (2k+1)^2 expansions).",
-    ("pose_search", "t_extent"): "Translation search extent in pixels.",
-    ("pose_search", "t_ngrid"): "Translation grid density parameter.",
-    ("pose_search", "t_xshift"): "Translation grid x offset (pixels).",
-    ("pose_search", "t_yshift"): "Translation grid y offset (pixels).",
+    ("pose_search", "neighbor_steps"): "Local neighborhood radius in grid steps.",
+    ("pose_search", "init_trans_grid_extent"): "Initial translation search extent in pixels.",
+    ("pose_search", "trans_grid_samples"): "Base number of translation-grid samples per axis.",
+    ("pose_search", "trans_grid_x_shift"): "Translation grid x offset (pixels).",
+    ("pose_search", "trans_grid_y_shift"): "Translation grid y offset (pixels).",
     ("pose_search", "pose_chunk_factor"): "Chunking factor for projection/translation computation (memory/speed tradeoff).",
-    ("pose_search", "max_candidates"): "Max number of pose candidates kept per image.",
+    ("pose_search", "max_candidates"): "Max number of pose candidates kept per image; use -1 for unlimited.",
     ("pose_search", "mse_chunk"): "Chunk size for MSE/likelihood evaluation.",
     ("pose_search", "candidate_select_threshold"): "Cumulative probability threshold for candidate selection.",
     ("pose_search", "renormalize_sel_prob"): "Renormalize selected per-image candidate probabilities to sum to 1 after truncation.",
@@ -125,11 +131,12 @@ _FIELD_DEFAULT_OVERRIDE: dict[tuple[str, str], str] = {
     (
         "data",
         "default_optic_params",
-    ): "{\"kV\": null, \"Cs\": null, \"Bfac\": null, \"scale\": null, \"Q0\": null, \"phase_shift\": null}",
+    ): "{\"voltage_kv\": null, \"spherical_aberration_mm\": null, \"bfactor\": null, "
+    "\"ctf_scale\": null, \"amplitude_contrast\": null, \"phase_shift_deg\": null}",
     (
         "data",
         "default_particle_params",
-    ): "{\"DeltafU\": null, \"DeltafV\": null, \"azimuthal_angle\": null}",
+    ): "{\"defocus_u_angstrom\": null, \"defocus_v_angstrom\": null, \"defocus_angle_deg\": null}",
 }
 
 
@@ -238,68 +245,131 @@ def _add_config_overrides(parser: argparse.ArgumentParser) -> None:
     ctf_group = parser.add_argument_group("ctf fallback overrides")
 
     ctf_group.add_argument(
-        "--kV",
-        dest="default_optic_params_kV",
+        "--voltage-kv",
+        dest="default_optic_params_voltage_kv",
         type=float,
         default=argparse.SUPPRESS,
-        help="Fallback for missing rlnVoltage (kV). Overrides data.default_optic_params['kV'] [built-in default: None].",
+        help="Fallback for missing rlnVoltage (kV). Overrides data.default_optic_params['voltage_kv'] [built-in default: None].",
+    )
+    ctf_group.add_argument(
+        "--kV",
+        dest="default_optic_params_voltage_kv",
+        type=float,
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
+    ctf_group.add_argument(
+        "--spherical-aberration-mm",
+        dest="default_optic_params_spherical_aberration_mm",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="Fallback for missing rlnSphericalAberration (mm). Overrides data.default_optic_params['spherical_aberration_mm'] [built-in default: None].",
     )
     ctf_group.add_argument(
         "--Cs",
-        dest="default_optic_params_Cs",
+        dest="default_optic_params_spherical_aberration_mm",
         type=float,
         default=argparse.SUPPRESS,
-        help="Fallback for missing rlnSphericalAberration (mm). Overrides data.default_optic_params['Cs'] [built-in default: None].",
+        help=argparse.SUPPRESS,
+    )
+    ctf_group.add_argument(
+        "--bfactor",
+        dest="default_optic_params_bfactor",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="Fallback for missing rlnCtfBfactor. Overrides data.default_optic_params['bfactor'] [built-in default: None].",
     )
     ctf_group.add_argument(
         "--Bfac",
-        dest="default_optic_params_Bfac",
+        dest="default_optic_params_bfactor",
         type=float,
         default=argparse.SUPPRESS,
-        help="Fallback for missing rlnCtfBfactor. Overrides data.default_optic_params['Bfac'] [built-in default: None].",
+        help=argparse.SUPPRESS,
+    )
+    ctf_group.add_argument(
+        "--ctf-scale",
+        dest="default_optic_params_ctf_scale",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="Fallback for missing rlnCtfScalefactor. Overrides data.default_optic_params['ctf_scale'] [built-in default: None].",
     )
     ctf_group.add_argument(
         "--scale",
-        dest="default_optic_params_scale",
+        dest="default_optic_params_ctf_scale",
         type=float,
         default=argparse.SUPPRESS,
-        help="Fallback for missing rlnCtfScalefactor. Overrides data.default_optic_params['scale'] [built-in default: None].",
+        help=argparse.SUPPRESS,
+    )
+    ctf_group.add_argument(
+        "--amplitude-contrast",
+        dest="default_optic_params_amplitude_contrast",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="Fallback for missing rlnAmplitudeContrast. Overrides data.default_optic_params['amplitude_contrast'] [built-in default: None].",
     )
     ctf_group.add_argument(
         "--Q0",
-        dest="default_optic_params_Q0",
+        dest="default_optic_params_amplitude_contrast",
         type=float,
         default=argparse.SUPPRESS,
-        help="Fallback for missing rlnAmplitudeContrast. Overrides data.default_optic_params['Q0'] [built-in default: None].",
+        help=argparse.SUPPRESS,
+    )
+    ctf_group.add_argument(
+        "--phase-shift-deg",
+        dest="default_optic_params_phase_shift_deg",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="Fallback for missing rlnPhaseShift (deg). Overrides data.default_optic_params['phase_shift_deg'] [built-in default: None].",
     )
     ctf_group.add_argument(
         "--phase-shift",
-        dest="default_optic_params_phase_shift",
+        dest="default_optic_params_phase_shift_deg",
         type=float,
         default=argparse.SUPPRESS,
-        help="Fallback for missing rlnPhaseShift (deg). Overrides data.default_optic_params['phase_shift'] [built-in default: None].",
+        help=argparse.SUPPRESS,
     )
 
     ctf_group.add_argument(
-        "--DeltafU",
-        dest="default_particle_params_DeltafU",
+        "--defocus-u-angstrom",
+        dest="default_particle_params_defocus_u_angstrom",
         type=float,
         default=argparse.SUPPRESS,
-        help="Fallback for missing rlnDefocusU (Angstrom). Overrides data.default_particle_params['DeltafU'] [built-in default: None].",
+        help="Fallback for missing rlnDefocusU (Angstrom). Overrides data.default_particle_params['defocus_u_angstrom'] [built-in default: None].",
+    )
+    ctf_group.add_argument(
+        "--DeltafU",
+        dest="default_particle_params_defocus_u_angstrom",
+        type=float,
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
+    ctf_group.add_argument(
+        "--defocus-v-angstrom",
+        dest="default_particle_params_defocus_v_angstrom",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="Fallback for missing rlnDefocusV (Angstrom). Overrides data.default_particle_params['defocus_v_angstrom'] [built-in default: None].",
     )
     ctf_group.add_argument(
         "--DeltafV",
-        dest="default_particle_params_DeltafV",
+        dest="default_particle_params_defocus_v_angstrom",
         type=float,
         default=argparse.SUPPRESS,
-        help="Fallback for missing rlnDefocusV (Angstrom). Overrides data.default_particle_params['DeltafV'] [built-in default: None].",
+        help=argparse.SUPPRESS,
+    )
+    ctf_group.add_argument(
+        "--defocus-angle-deg",
+        dest="default_particle_params_defocus_angle_deg",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="Fallback for missing rlnDefocusAngle (deg). Overrides data.default_particle_params['defocus_angle_deg'] [built-in default: None].",
     )
     ctf_group.add_argument(
         "--defocus-angle",
-        dest="default_particle_params_azimuthal_angle",
+        dest="default_particle_params_defocus_angle_deg",
         type=float,
         default=argparse.SUPPRESS,
-        help="Fallback for missing rlnDefocusAngle (deg). Overrides data.default_particle_params['azimuthal_angle'] [built-in default: None].",
+        help=argparse.SUPPRESS,
     )
 
 

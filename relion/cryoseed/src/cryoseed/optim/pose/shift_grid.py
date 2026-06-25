@@ -1,40 +1,69 @@
 """
-From CryoDRGN
+Hierarchical translation-grid utilities used by pose search.
+
+This implementation is adapted from cryoDRGN-style shift-grid logic, but has
+been substantially reworked from earlier NumPy-style code and is now
+implemented directly with PyTorch tensors.
 """
 
-import numpy as np
 import torch
 
 
-def grid_1d(resol: int, extent: int, ngrid: int, shift: int = 0) -> np.ndarray:
+def _infer_device(*values) -> torch.device | None:
+    for value in values:
+        if isinstance(value, torch.Tensor):
+            return value.device
+    return None
+
+
+def _as_tensor(value, *, dtype=None, device=None) -> torch.Tensor:
+    if isinstance(value, torch.Tensor):
+        if dtype is not None or device is not None:
+            return value.to(
+                dtype=dtype if dtype is not None else value.dtype,
+                device=device if device is not None else value.device,
+            )
+        return value
+    return torch.as_tensor(value, dtype=dtype, device=device)
+
+
+def _as_scalar_int(value) -> int:
+    if isinstance(value, torch.Tensor):
+        return int(value.item())
+    return int(value)
+
+
+def grid_1d(resol: int, extent: int, ngrid: int, shift: int = 0) -> torch.Tensor:
     Npix = ngrid * 2**resol
     dt = 2 * extent / Npix
-    grid = np.arange(Npix, dtype=np.float32) * dt + dt / 2 - extent + shift
+    grid = torch.arange(Npix, dtype=torch.float32) * dt + dt / 2 - extent + shift
     return grid
 
 
 def get_1d_shift(
     mini, resol: int, extent: int, ngrid: int, shift: int = 0
-) -> np.ndarray:
+) -> torch.Tensor:
     Npix = ngrid * 2**resol
     dt = 2 * extent / Npix
+    mini = _as_tensor(mini, dtype=torch.float32, device=_infer_device(mini))
     grid = mini * dt + dt / 2 - extent + shift
     return grid
 
 
 def grid_2d(
     resol: int, extent: int, ngrid: int, xshift: int = 0, yshift: int = 0
-) -> np.ndarray:
+) -> torch.Tensor:
     x = grid_1d(resol, extent, ngrid, shift=xshift)
     y = grid_1d(resol, extent, ngrid, shift=yshift)
     # convention: x is fast dim, y is slow dim
-    grid = np.stack(np.meshgrid(x, y), -1)
+    x_grid, y_grid = torch.meshgrid(x, y, indexing="xy")
+    grid = torch.stack((x_grid, y_grid), dim=-1)
     return grid.reshape(-1, 2)
 
 
 def base_shift_grid(
     resol: int, extent: int, ngrid: int, xshift: int = 0, yshift: int = 0
-) -> np.ndarray:
+) -> torch.Tensor:
     return grid_2d(resol, extent, ngrid, xshift, yshift)
 
 
@@ -42,30 +71,32 @@ def base_shift_grid(
 def get_1d_neighbor(mini, cur_res, extent, ngrid):
     Npix = ngrid * 2 ** (cur_res + 1)
     dt = 2 * extent / Npix
-    ind = np.array([2 * mini, 2 * mini + 1], dtype=np.float32)
+    device = _infer_device(mini)
+    mini = _as_tensor(mini, dtype=torch.long, device=device)
+    ind = torch.stack((2 * mini, 2 * mini + 1), dim=-1)
     return dt * ind + dt / 2 - extent, ind
 
 
 def get_base_ind(ind, ngrid):
     """
-    Fengyu's note:
-        Only get 2D ind on the BASE 2D grid
-
+    Only get 2D indices on the base grid.
     """
+    device = _infer_device(ind)
+    ind = _as_tensor(ind, dtype=torch.long, device=device)
     xi = ind % ngrid
     yi = ind // ngrid
-    return np.stack((xi, yi), axis=1)
+    return torch.stack((xi, yi), dim=-1)
 
 
 def get_ind(ind, Npix):
     """
-    Fengyu:
-    Get 2D ind on the 2D grid with Npix pixels
-
+    Get 2D indices on the grid with ``Npix`` pixels per side.
     """
+    device = _infer_device(ind)
+    ind = _as_tensor(ind, dtype=torch.long, device=device)
     xi = ind % Npix
     yi = ind // Npix
-    return np.stack((xi, yi), axis=1)
+    return torch.stack((xi, yi), dim=-1)
 
 
 def get_neighbor(xi, yi, cur_res, extent, ngrid):
@@ -74,8 +105,24 @@ def get_neighbor(xi, yi, cur_res, extent, ngrid):
     """
     x_next, xii = get_1d_neighbor(xi, cur_res, extent, ngrid)
     y_next, yii = get_1d_neighbor(yi, cur_res, extent, ngrid)
-    t_next = np.stack(np.meshgrid(x_next, y_next), -1).reshape(-1, 2)
-    ind_next = np.stack(np.meshgrid(xii, yii), -1).reshape(-1, 2)
+    t_next = torch.stack(
+        (
+            torch.stack((x_next[..., 0], y_next[..., 0]), dim=-1),
+            torch.stack((x_next[..., 1], y_next[..., 0]), dim=-1),
+            torch.stack((x_next[..., 0], y_next[..., 1]), dim=-1),
+            torch.stack((x_next[..., 1], y_next[..., 1]), dim=-1),
+        ),
+        dim=-2,
+    )
+    ind_next = torch.stack(
+        (
+            torch.stack((xii[..., 0], yii[..., 0]), dim=-1),
+            torch.stack((xii[..., 1], yii[..., 0]), dim=-1),
+            torch.stack((xii[..., 0], yii[..., 1]), dim=-1),
+            torch.stack((xii[..., 1], yii[..., 1]), dim=-1),
+        ),
+        dim=-2,
+    )
     return t_next, ind_next
 
 
@@ -94,6 +141,8 @@ def get_2d_neighbor_current_res(xi, yi, cur_res, extent, ngrid):
         neighbor_coords: (N, 2) array of (x, y) coordinates
         neighbor_indices: (N, 2) array of (xi, yi) indices
     """
+    xi = _as_scalar_int(xi)
+    yi = _as_scalar_int(yi)
     Npix_1d = ngrid * 2**cur_res
 
     # Get immediate neighbors in 2D grid (8-connected neighborhood)
@@ -109,21 +158,23 @@ def get_2d_neighbor_current_res(xi, yi, cur_res, extent, ngrid):
             xi_neighbors.append(new_xi)
             yi_neighbors.append(new_yi)
 
-    xi_neighbors = np.array(xi_neighbors)
-    yi_neighbors = np.array(yi_neighbors)
+    xi_neighbors = torch.tensor(xi_neighbors, dtype=torch.long)
+    yi_neighbors = torch.tensor(yi_neighbors, dtype=torch.long)
 
     # Convert indices to coordinates
     dt = 2 * extent / Npix_1d
     x_coords = xi_neighbors * dt + dt / 2 - extent
     y_coords = yi_neighbors * dt + dt / 2 - extent
 
-    neighbor_coords = np.column_stack([x_coords, y_coords])
-    neighbor_indices = np.column_stack([xi_neighbors, yi_neighbors])
+    neighbor_coords = torch.stack((x_coords, y_coords), dim=-1)
+    neighbor_indices = torch.stack((xi_neighbors, yi_neighbors), dim=-1)
 
     return neighbor_coords, neighbor_indices
 
 
-def get_2d_k_step_neighbors(center_xi, center_yi, k_steps, cur_res, extent, ngrid):
+def get_2d_k_step_neighbors(
+    center_xi, center_yi, k_steps, cur_res, extent, ngrid
+):
     """
     Find all 2D grid points within k steps of the center using BFS
 
@@ -140,6 +191,9 @@ def get_2d_k_step_neighbors(center_xi, center_yi, k_steps, cur_res, extent, ngri
         neighbor_indices: (N, 2) array of (xi, yi) indices
         step_levels: (N,) array of step distances
     """
+    center_xi = _as_scalar_int(center_xi)
+    center_yi = _as_scalar_int(center_yi)
+
     visited = set()
     neighbors_by_step = {0: [(center_xi, center_yi)]}
     queue = [(center_xi, center_yi, 0)]
@@ -177,14 +231,14 @@ def get_2d_k_step_neighbors(center_xi, center_yi, k_steps, cur_res, extent, ngri
                 all_indices.append([xi, yi])
                 step_levels.append(step)
 
-    all_indices = np.array(all_indices)
-    step_levels = np.array(step_levels)
+    all_indices = torch.tensor(all_indices, dtype=torch.long)
+    step_levels = torch.tensor(step_levels, dtype=torch.long)
 
     # Convert to coordinates
     dt = 2 * extent / Npix_1d
     x_coords = all_indices[:, 0] * dt + dt / 2 - extent
     y_coords = all_indices[:, 1] * dt + dt / 2 - extent
-    neighbor_coords = np.column_stack([x_coords, y_coords])
+    neighbor_coords = torch.stack((x_coords, y_coords), dim=-1)
 
     return neighbor_coords, all_indices, step_levels
 
@@ -209,29 +263,22 @@ def sample_2d_higher_resolution(neighbor_indices, cur_res, target_res, extent, n
 
     # Calculate subdivision factor
     subdivision_factor = 2 ** (target_res - cur_res)
+    device = _infer_device(neighbor_indices)
+    neighbor_indices = _as_tensor(neighbor_indices, dtype=torch.long, device=device)
 
-    high_res_indices = []
-
-    for xi, yi in neighbor_indices:
-        # Each index at cur_res maps to subdivision_factor^2 indices at target_res
-        xi_start = xi * subdivision_factor
-        xi_end = xi_start + subdivision_factor
-        yi_start = yi * subdivision_factor
-        yi_end = yi_start + subdivision_factor
-
-        # Generate all combinations in the subdivision
-        for new_xi in range(xi_start, xi_end):
-            for new_yi in range(yi_start, yi_end):
-                high_res_indices.append([new_xi, new_yi])
-
-    high_res_indices = np.array(high_res_indices)
+    offsets = torch.arange(subdivision_factor, device=neighbor_indices.device)
+    x_offset, y_offset = torch.meshgrid(offsets, offsets, indexing="ij")
+    offset_pairs = torch.stack((x_offset, y_offset), dim=-1).reshape(-1, 2)
+    high_res_indices = (
+        neighbor_indices[:, None, :] * subdivision_factor + offset_pairs[None, :, :]
+    ).reshape(-1, 2)
 
     # Convert to coordinates
     Npix_1d_target = ngrid * 2**target_res
     dt = 2 * extent / Npix_1d_target
     x_coords = high_res_indices[:, 0] * dt + dt / 2 - extent
     y_coords = high_res_indices[:, 1] * dt + dt / 2 - extent
-    high_res_coords = np.column_stack([x_coords, y_coords])
+    high_res_coords = torch.stack((x_coords, y_coords), dim=-1)
 
     return high_res_coords, high_res_indices
 
@@ -257,7 +304,7 @@ def get_2d_local_sampling(
         original_neighbors: original k-step neighbors at current resolution
     """
     # Step 1: Find k-step neighbors at current resolutio
-    neighbor_coords, neighbor_indices, step_levels = get_2d_k_step_neighbors(
+    neighbor_coords, neighbor_indices, _ = get_2d_k_step_neighbors(
         center_xi, center_yi, k_steps, cur_res, extent, ngrid
     )
     if cur_res < target_res:
@@ -289,8 +336,9 @@ def get_trans_from_ind(resol, xi, yi, extent, ngrid):
         translations: (N, 2) array of (x, y) translation coordinates
     """
     # Handle single indices or arrays
-    xi = np.asarray(xi)
-    yi = np.asarray(yi)
+    device = _infer_device(xi, yi)
+    xi = _as_tensor(xi, dtype=torch.long, device=device)
+    yi = _as_tensor(yi, dtype=torch.long, device=device)
 
     # Ensure they're the same shape
     if xi.shape != yi.shape:
@@ -309,7 +357,7 @@ def get_trans_from_ind(resol, xi, yi, extent, ngrid):
     y_coords = yi_flat * dt + dt / 2 - extent
 
     # Stack into (N, 2) array
-    translations = np.column_stack([x_coords, y_coords])
+    translations = torch.stack((x_coords, y_coords), dim=-1)
 
     # Reshape back to original shape if needed
     if original_shape:
@@ -336,24 +384,19 @@ def subdivide_2Dgrid(trans, ind2d, cur_res: int, t_extent: int, t_ngrid: int):
     trans_idx : (N, 4, 2) 2d index of trans on the next resolution
 
     """
-
-    N = trans.shape[0]
-
-    neighbors = [
-        get_neighbor(ind2d[i, 0], ind2d[i, 1], cur_res - 1, t_extent, t_ngrid)
-        for i in range(N)
-    ]
-
-    trans = torch.from_numpy(np.array([neighbor[0] for neighbor in neighbors])).to(
-        trans
+    trans_dtype = trans.dtype if trans.is_floating_point() else torch.float32
+    ind2d = _as_tensor(ind2d, dtype=torch.long, device=trans.device)
+    next_trans, trans_idx = get_neighbor(
+        ind2d[:, 0], ind2d[:, 1], cur_res - 1, t_extent, t_ngrid
     )
-    trans_idx = torch.from_numpy(np.array([neighbor[1] for neighbor in neighbors])).to(
-        trans
-    )
-    return trans, trans_idx
+    next_trans = next_trans.to(device=trans.device, dtype=trans_dtype)
+    trans_idx = trans_idx.to(device=trans.device, dtype=torch.long)
+    return next_trans, trans_idx
 
 
-def translation_local_sampling(translations, target_res, extent, ngrid, k_steps=1):
+def translation_local_sampling(
+    translations, target_res, extent, ngrid, k_steps=1
+):
     """
     Local sampling around given translation coordinates using grid steps from target_res
 
@@ -371,8 +414,10 @@ def translation_local_sampling(translations, target_res, extent, ngrid, k_steps=
         Grid step is determined by target_res: dt = 2 * extent / (ngrid * 2^target_res)
     """
     # Convert to torch if needed
-    if isinstance(translations, np.ndarray):
-        translations = torch.from_numpy(translations.astype(np.float32))
+    if not isinstance(translations, torch.Tensor):
+        translations = torch.as_tensor(translations, dtype=torch.float32)
+    else:
+        translations = translations.to(dtype=torch.float32)
 
     if translations.ndim == 1:
         translations = translations.unsqueeze(0)
@@ -398,9 +443,6 @@ def translation_local_sampling(translations, target_res, extent, ngrid, k_steps=
     # Generate candidates for all input translations at once
     # trans_coords: (N, 2), k_flat: (n_offsets,)
     # We want: (N, n_offsets, 2)
-    n_inputs = trans_coords.shape[0]
-    n_offsets = k_x_flat.shape[0]
-
     # Expand dimensions for broadcasting
     x_center = trans_coords[:, 0].unsqueeze(1)  # (N, 1)
     y_center = trans_coords[:, 1].unsqueeze(1)  # (N, 1)

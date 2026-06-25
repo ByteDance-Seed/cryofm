@@ -50,6 +50,11 @@ class Pose(nn.Module):
             torch.zeros(num_particles, 2, device=dev),
             requires_grad=requires_grad,
         )
+        self.register_buffer(
+            "trans_update_rms",
+            torch.zeros(1, dtype=self.trans.dtype, device=dev),
+            persistent=False,
+        )
 
         self.register_buffer(
             "valid_count",
@@ -64,6 +69,11 @@ class Pose(nn.Module):
         self.register_buffer(
             "trans_accum",
             torch.zeros(num_particles, 2, dtype=self.trans.dtype, device=dev),
+            persistent=False,
+        )
+        self.register_buffer(
+            "trans_update_rms_accum",
+            torch.zeros(1, dtype=self.trans.dtype, device=dev),
             persistent=False,
         )
 
@@ -86,6 +96,8 @@ class Pose(nn.Module):
         translation: torch.Tensor,
     ):
         self.valid_count[index] += 1
+        self.trans_update_rms_accum += (translation - self.trans[index]).pow(2).sum()
+
         self.quat_accum[index] = quaternion
         self.trans_accum[index] = translation
 
@@ -94,6 +106,7 @@ class Pose(nn.Module):
         self.valid_count.zero_()
         self.quat_accum.zero_()
         self.trans_accum.zero_()
+        self.trans_update_rms_accum.zero_()
 
     @torch.no_grad()
     def update(self, all_reduce: bool = True):
@@ -113,6 +126,7 @@ class Pose(nn.Module):
                 dist.all_reduce(self.valid_count, op=dist.ReduceOp.SUM, group=group)
                 dist.all_reduce(self.quat_accum, op=dist.ReduceOp.SUM, group=group)
                 dist.all_reduce(self.trans_accum, op=dist.ReduceOp.SUM, group=group)
+                dist.all_reduce(self.trans_update_rms_accum, op=dist.ReduceOp.SUM, group=group)
 
         if (self.valid_count > 1).any():
             raise ValueError("Some particles were updated more than once.")
@@ -122,3 +136,6 @@ class Pose(nn.Module):
         if idx.numel() > 0:
             self.quat.index_copy_(0, idx, F.normalize(self.quat_accum[idx], dim=-1))
             self.trans.index_copy_(0, idx, self.trans_accum[idx])
+            self.trans_update_rms.copy_(
+                torch.sqrt(self.trans_update_rms_accum / self.valid_count.sum())
+            )

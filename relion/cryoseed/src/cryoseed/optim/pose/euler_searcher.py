@@ -40,11 +40,10 @@ class EulerPoseSearcher(torch.nn.Module):
             noise=noise,
             device=device,
             device_mesh=device_mesh,
-            k_steps=config.pose_search.k_steps,
-            t_extent=config.pose_search.t_extent,
-            t_ngrid=config.pose_search.t_ngrid,
-            t_xshift=config.pose_search.t_xshift,
-            t_yshift=config.pose_search.t_yshift,
+            neighbor_steps=config.pose_search.neighbor_steps,
+            trans_grid_samples=config.pose_search.trans_grid_samples,
+            trans_grid_x_shift=config.pose_search.trans_grid_x_shift,
+            trans_grid_y_shift=config.pose_search.trans_grid_y_shift,
             pose_chunk_factor=config.pose_search.pose_chunk_factor,
             max_candidates=config.pose_search.max_candidates,
             mse_chunk=config.pose_search.mse_chunk,
@@ -61,15 +60,14 @@ class EulerPoseSearcher(torch.nn.Module):
         noise: NoiseVariance | None = None,
         device: torch.device | str | None = None,
         device_mesh: Any | None = None,
-        k_steps: int = 2,
-        t_extent: int = 35,
-        t_ngrid: int = 7,
-        t_xshift: int = 0,
-        t_yshift: int = 0,
+        neighbor_steps: int = 2,
+        trans_grid_samples: int = 5,
+        trans_grid_x_shift: int = 0,
+        trans_grid_y_shift: int = 0,
         pose_chunk_factor: int = 2560,
         max_candidates: int = 100,
         mse_chunk: int = 8192,
-        candidate_select_threshold: float = 0.9999,
+        candidate_select_threshold: float = 0.999,
         renormalize_sel_prob: bool = True,
     ):
         super().__init__()
@@ -83,25 +81,24 @@ class EulerPoseSearcher(torch.nn.Module):
         self.device_mesh = device_mesh
 
         # fixed parameters
-        self.k_steps = k_steps
-        self.t_extent = t_extent
-        self.t_ngrid = t_ngrid
-        self.t_xshift = t_xshift
-        self.t_yshift = t_yshift
+        self.neighbor_steps = neighbor_steps
+        self.trans_grid_samples = trans_grid_samples
+        self.trans_grid_x_shift = trans_grid_x_shift
+        self.trans_grid_y_shift = trans_grid_y_shift
         self.pose_chunk_factor = pose_chunk_factor
-        self.max_candidates = max_candidates
         self.mse_chunk = mse_chunk
         self.candidate_select_threshold = candidate_select_threshold
         self.renormalize_sel_prob = renormalize_sel_prob
 
-        if self.k_steps < 0:
-            raise ValueError("k_steps must be >= 0")
+        if self.neighbor_steps < 0:
+            raise ValueError("neighbor_steps must be >= 0")
         if self.pose_chunk_factor is not None and self.pose_chunk_factor <= 0:
             raise ValueError("pose_chunk_factor must be positive or None")
         if self.mse_chunk <= 0:
             raise ValueError("mse_chunk must be > 0")
-        if self.max_candidates <= 0:
-            raise ValueError("max_candidates must be > 0")
+        if max_candidates == 0 or max_candidates < -1:
+            raise ValueError("max_candidates must be > 0, or -1 for unlimited")
+        self.max_candidates = None if max_candidates == -1 else int(max_candidates)
         if not (0 < self.candidate_select_threshold <= 1):
             raise ValueError("candidate_select_threshold must be in (0, 1]")
 
@@ -156,15 +153,18 @@ class EulerPoseSearcher(torch.nn.Module):
         self.side_length = int(schedule.side_length)
         self.base_healpix_order = int(schedule.healpix_order)
         self.current_healpix_order = int(schedule.healpix_order)
+        self.base_trans_healpix_order = 0
+        self.current_trans_healpix_order = 0
         self.num_oversampling = int(schedule.oversampling)
+        self.trans_grid_extent = float(schedule.trans_grid_extent)
 
         if self.side_length <= 0:
             raise ValueError(f"side_length must be > 0, got {self.side_length}")
 
         if self.base_healpix_order < 1:
-            raise ValueError(
-                "healpix_order must be >= 1 because translation grid uses order-1"
-            )
+            raise ValueError("healpix_order must be >= 1")
+        if self.trans_grid_extent < 0:
+            raise ValueError("trans_grid_extent must be >= 0")
 
     def _refresh_radial_buffers(self) -> None:
         with torch.no_grad():
@@ -183,6 +183,52 @@ class EulerPoseSearcher(torch.nn.Module):
             denom[counts > 0] = 1.0 / counts[counts > 0]
             self._set_buffer("ring_denom", denom, persistent=False)
 
+    def _radial_residual_power(
+        self,
+        proj_image: torch.Tensor,
+        trans_image: torch.Tensor,
+        *,
+        sel2proj_idx: torch.LongTensor,
+        sel2trans_idx: torch.LongTensor,
+    ) -> torch.Tensor:
+        """Compute radial residual power for selected hypotheses.
+
+        Args:
+            proj_image: Projection buffer of shape ``(B*K*Q, P)`` or ``(N*Q, P)``.
+            trans_image: Translated-image buffer of shape ``(B*T, P)`` or ``(N*T, P)``.
+            sel2proj_idx: Row indices mapping each selected hypothesis to ``proj_image``.
+            sel2trans_idx: Row indices mapping each selected hypothesis to ``trans_image``.
+
+        Returns:
+            Tensor of shape ``(N_sel, R)`` containing the per-ring mean squared residual
+            for each selected hypothesis.
+        """
+        sel2proj_idx = sel2proj_idx.to(device=proj_image.device, dtype=torch.long)
+        sel2trans_idx = sel2trans_idx.to(device=trans_image.device, dtype=torch.long)
+        ring_idx = self.valid_pixel2ring_idx
+        ring_denom = self.ring_denom
+        if ring_idx.device != proj_image.device:
+            ring_idx = ring_idx.to(proj_image.device)
+        if ring_denom.device != proj_image.device:
+            ring_denom = ring_denom.to(proj_image.device)
+
+        N = int(sel2proj_idx.numel())
+        radial_residual_power = torch.zeros((N, int(self.R)), device=proj_image.device, dtype=torch.float32)
+        residual_chunk = max(1, int(self.mse_chunk))
+        for chunk_start in range(0, N, residual_chunk):
+            chunk_end = min(chunk_start + residual_chunk, N)
+            proj_sel = proj_image.index_select(0, sel2proj_idx[chunk_start:chunk_end])
+            trans_sel = trans_image.index_select(0, sel2trans_idx[chunk_start:chunk_end])
+            residual_power = (proj_sel - trans_sel).abs().square().to(torch.float32)
+            radial_residual_power[chunk_start:chunk_end].scatter_add_(
+                1,
+                ring_idx.view(1, -1).expand(chunk_end - chunk_start, -1),
+                residual_power,
+            )
+            radial_residual_power[chunk_start:chunk_end] *= ring_denom.view(1, -1)
+
+        return radial_residual_power
+
     def refresh(self) -> None:
         """Refresh buffers derived from the current schedule (side length, healpix order, etc.)."""
         self._refresh_schedule_state()
@@ -192,13 +238,18 @@ class EulerPoseSearcher(torch.nn.Module):
         self,
         anchor: torch.Tensor,
         *,
-        k_steps: int | None = None,
+        neighbor_steps: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Sample rotation neighbors around an anchor quaternion.
 
+        This searcher exposes the user-facing name ``neighbor_steps``. The lower-level
+        SO(3) helper in ``so3_grid`` still uses the historical argument name
+        ``k_steps``, so this method only performs a naming translation at the call site.
+
         Args:
             anchor: Anchor quaternions of shape ``(N, 4)``.
-            k_steps: Local sampling radius. If ``None``, uses ``self.k_steps``.
+            neighbor_steps: Neighborhood radius in grid steps. If ``None``, uses
+                ``self.neighbor_steps``.
 
         Returns:
             A tuple ``(quat, rotmat)`` where:
@@ -206,18 +257,20 @@ class EulerPoseSearcher(torch.nn.Module):
             - quat: Sampled quaternions with shape ``(N, Q, 4)``.
             - rotmat: Rotation matrices with shape ``(N, Q, 3, 3)``.
 
-            Here ``Q = (2 * k_steps + 1) ** 3``.
+            Here ``Q = (2 * neighbor_steps + 1) ** 3``.
         """
         current_healpix_order = int(self.current_healpix_order)
-        k_steps = int(self.k_steps if k_steps is None else k_steps)
-        Q = int((2 * k_steps + 1) ** 3)
+        neighbor_steps = int(
+            self.neighbor_steps if neighbor_steps is None else neighbor_steps
+        )
+        Q = int((2 * neighbor_steps + 1) ** 3)
 
         rotmat_anchor = quaternion_to_matrix(anchor)
         euler_anchor = matrix_to_euler(rotmat_anchor)
         _, quat, rotmat = so3_grid.euler_local_sampling(
             euler_anchor,
             current_healpix_order,
-            k_steps=k_steps,
+            k_steps=neighbor_steps,
         )
 
         quat = quat.view(-1, Q, 4).to(self.device)
@@ -229,30 +282,37 @@ class EulerPoseSearcher(torch.nn.Module):
         self,
         anchor: torch.Tensor,
         *,
-        k_steps: int | None = None,
+        neighbor_steps: int | None = None,
     ) -> torch.Tensor:
         """Sample translation neighbors around an anchor translation.
+
+        This searcher exposes the user-facing name ``neighbor_steps``. The lower-level
+        translation-grid helper in ``shift_grid`` still uses the historical argument
+        name ``k_steps``, so this method only performs a naming translation at the
+        call site.
 
         Args:
             anchor: Anchor translations of shape ``(N, 2)`` in pixels on the input Fourier grid
                 (``D = image.shape[-1]`` in :meth:`search`).
-            k_steps: Local sampling radius. If ``None``, uses ``self.k_steps``.
+            neighbor_steps: Neighborhood radius in grid steps. If ``None``, uses
+                ``self.neighbor_steps``.
 
         Returns:
             Sampled translations with shape ``(N, T, 2)``, where
-            ``T = (2 * k_steps + 1) ** 2``.
+            ``T = (2 * neighbor_steps + 1) ** 2``.
         """
-        current_healpix_order = int(self.current_healpix_order)
-        trans_healpix_order = current_healpix_order - 1
-        k_steps = int(self.k_steps if k_steps is None else k_steps)
-        T = int((2 * k_steps + 1) ** 2)
+        trans_healpix_order = int(self.current_trans_healpix_order)
+        neighbor_steps = int(
+            self.neighbor_steps if neighbor_steps is None else neighbor_steps
+        )
+        T = int((2 * neighbor_steps + 1) ** 2)
 
         trans = shift_grid.translation_local_sampling(
             anchor,
             trans_healpix_order,
-            self.t_extent,
-            self.t_ngrid,
-            k_steps=k_steps,
+            self.trans_grid_extent,
+            self.trans_grid_samples,
+            k_steps=neighbor_steps,
         )
         trans = trans.view(-1, T, 2)
 
@@ -622,7 +682,7 @@ class EulerPoseSearcher(torch.nn.Module):
             sel_payload: Dict with the same keys as ``payload``, each tensor of shape (N_sel,).
         """
         threshold = self.candidate_select_threshold
-        max_candidates = int(self.max_candidates)
+        max_candidates = self.max_candidates
 
         if hypo_prob.numel() == 0:
             raise ValueError("hypo_prob must be non-empty")
@@ -655,7 +715,9 @@ class EulerPoseSearcher(torch.nn.Module):
             prob_cumsum = torch.cumsum(prob_sorted, dim=0)
 
             keep_count = int((prob_cumsum < threshold).sum().item()) + 1
-            keep_count = min(keep_count, img_cnt, max_candidates)
+            keep_count = min(keep_count, img_cnt)
+            if max_candidates is not None:
+                keep_count = min(keep_count, max_candidates)
 
             sel_idx = start + prob_idx_sorted[:keep_count]
 
@@ -743,7 +805,8 @@ class EulerPoseSearcher(torch.nn.Module):
                 The batch dimension must match ``image.shape[0]`` (no broadcasting).
 
         Returns:
-            A 5-tuple ``(sel_prob, sel2img_idx, sel2vol_idx, sel_rotmat, sel_trans)``, where:
+            A 6-tuple ``(sel_prob, sel2img_idx, sel2vol_idx, sel_rotmat, sel_trans,
+            sel_radial_residual_power)``, where:
 
             - sel_prob (torch.Tensor): Selected hypothesis probabilities with shape ``(N_sel,)``.
               Candidates are grouped by image index (``sel2img_idx``).
@@ -755,6 +818,9 @@ class EulerPoseSearcher(torch.nn.Module):
               ``(N_sel, 3, 3)``.
             - sel_trans (torch.Tensor): 2D translations (in pixels) for each selected hypothesis with shape
               ``(N_sel, 2)``.
+            - sel_radial_residual_power (torch.Tensor | None): Optional per-hypothesis radial
+              residual power with shape ``(N_sel, side_length // 2 + 1)``. Returned only when
+              noise estimation is enabled.
 
               Unit convention: translations are expressed in pixels of the *input* Fourier grid
               (``D = image.shape[-1]``) and are not scaled by the current ``side_length``.
@@ -793,16 +859,26 @@ class EulerPoseSearcher(torch.nn.Module):
             ctf = ctf.to(device)
 
         self.current_healpix_order = self.base_healpix_order
+        self.current_trans_healpix_order = self.base_trans_healpix_order
+        sel_radial_residual_power = None
+        proj_flat = None
+        trans_flat = None
+        sel2proj_flat_idx = None
+        sel2trans_flat_idx = None
 
         if self.state.schedule.pose_search_scope == "local":
-            k_steps = int(self.k_steps)
+            neighbor_steps = int(self.neighbor_steps)
 
             img_idx = torch.arange(B, device=device, dtype=torch.long)  # shape: (B,)
             quat = self.pose.quaternion(particle_index)  # shape: (B, 4)
             trans = self.pose.translation(particle_index)  # shape: (B, 2)
 
-            quat, rotmat = self._expand_current_rot_neighbors(quat, k_steps=k_steps) # (B, Q, 4)
-            trans = self._expand_current_trans_neighbors(trans, k_steps=k_steps) # (B, T, 2)
+            quat, rotmat = self._expand_current_rot_neighbors(
+                quat, neighbor_steps=neighbor_steps
+            ) # (B, Q, 4)
+            trans = self._expand_current_trans_neighbors(
+                trans, neighbor_steps=neighbor_steps
+            ) # (B, T, 2)
 
             Q = int(quat.shape[1])
             T = int(trans.shape[1])
@@ -845,6 +921,14 @@ class EulerPoseSearcher(torch.nn.Module):
             sel2rot_idx = sel_payload["rot"]
             sel2trans_idx = sel_payload["trans"]
 
+            if self.noise is not None:
+                proj_flat = proj_image.reshape(B * (K * Q), -1)
+                trans_flat = trans_image.reshape(B * T, -1)
+                local_rot_idx = sel2rot_idx % Q
+                local_trans_idx = sel2trans_idx % T
+                sel2proj_flat_idx = sel2img_idx * (K * Q) + sel2vol_idx * Q + local_rot_idx
+                sel2trans_flat_idx = sel2img_idx * T + local_trans_idx
+
             sel_quat = quat.view(B * Q, -1)[sel2rot_idx]
             sel_trans = trans.view(B * T, -1)[sel2trans_idx]
 
@@ -866,10 +950,15 @@ class EulerPoseSearcher(torch.nn.Module):
 
         for oversampling_round in range(self.num_oversampling):
             self.current_healpix_order = int(self.base_healpix_order) + oversampling_round + 1
-            k_steps = 1
+            self.current_trans_healpix_order = int(self.base_trans_healpix_order) + oversampling_round + 1
+            neighbor_steps = 1
 
-            quat, rotmat = self._expand_current_rot_neighbors(sel_quat, k_steps=k_steps)  # (N, Q, 4)
-            trans = self._expand_current_trans_neighbors(sel_trans, k_steps=k_steps)  # (N, T, 2)
+            quat, rotmat = self._expand_current_rot_neighbors(
+                sel_quat, neighbor_steps=neighbor_steps
+            )  # (N, Q, 4)
+            trans = self._expand_current_trans_neighbors(
+                sel_trans, neighbor_steps=neighbor_steps
+            )  # (N, T, 2)
 
             N = int(sel2img_idx.shape[0])
             Q = int(quat.shape[1])
@@ -910,6 +999,12 @@ class EulerPoseSearcher(torch.nn.Module):
             sel2rot_idx = sel_payload["rot"]
             sel2trans_idx = sel_payload["trans"]
 
+            if self.noise is not None:
+                proj_flat = proj_image.view(N * Q, -1)
+                trans_flat = trans_image.view(N * T, -1)
+                sel2proj_flat_idx = sel2rot_idx
+                sel2trans_flat_idx = sel2trans_idx
+
             sel_quat = quat.view(N * Q, -1)[sel2rot_idx]
             sel_trans = trans.view(N * T, -1)[sel2trans_idx]
 
@@ -926,6 +1021,7 @@ class EulerPoseSearcher(torch.nn.Module):
             )
 
         self.current_healpix_order = self.base_healpix_order
+        self.current_trans_healpix_order = self.base_trans_healpix_order
 
         self.pose.accumulate(
             particle_index,
@@ -935,4 +1031,12 @@ class EulerPoseSearcher(torch.nn.Module):
 
         sel_rotmat = quaternion_to_matrix(sel_quat).to(self.device)
 
-        return sel_prob, sel2img_idx, sel2vol_idx, sel_rotmat, sel_trans
+        if self.noise is not None and proj_flat is not None:
+            sel_radial_residual_power = self._radial_residual_power(
+                proj_flat,
+                trans_flat,
+                sel2proj_idx=sel2proj_flat_idx,
+                sel2trans_idx=sel2trans_flat_idx,
+            )
+
+        return sel_prob, sel2img_idx, sel2vol_idx, sel_rotmat, sel_trans, sel_radial_residual_power

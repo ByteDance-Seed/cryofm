@@ -31,6 +31,8 @@ class ProgressState:
     """Written by engine only."""
     epoch: int = 0
     half: int = 0  # current half
+    num_epochs_without_resolution_gain: int = 0
+    has_converged: bool = False
 
 
 @dataclass
@@ -41,7 +43,9 @@ class ScheduleState:
     healpix_order: int = 2
     oversampling: int = 1
     side_length: int = 32
+    trans_grid_extent: float = 5.0
     proj_cache_backend: str = "none"
+    full_backprojection: bool = False
 
 
 @dataclass
@@ -49,7 +53,9 @@ class MetricsState:
     """Written by solver/logger; scheduler reads it."""
     fsc_scores: Any | None = None
     fsc_resolution: float | None = None
+    fsc_resolution_change: float | None = None
     healpix_order_from_resolution: int = 0
+    trans_update_rms: float = 0.0
 
     confidence_sum: float = 0.0
     confidence_count: int = 0
@@ -93,11 +99,21 @@ class OptimState:
         st = cls(version=int(d.get("version", 1)))
 
         progress_kwargs = cls._filter_dataclass_kwargs(ProgressState, d.get("progress", {}))
-        cls._coerce_int_fields(progress_kwargs, "epoch", "half")
+        cls._coerce_int_fields(
+            progress_kwargs,
+            "epoch",
+            "half",
+            "num_epochs_without_resolution_gain",
+        )
         st.progress = ProgressState(**progress_kwargs)
 
         sched_kwargs = cls._filter_dataclass_kwargs(ScheduleState, d.get("schedule", {}))
-        cls._coerce_int_fields(sched_kwargs, "healpix_order", "oversampling", "side_length")
+        cls._coerce_int_fields(
+            sched_kwargs,
+            "healpix_order",
+            "oversampling",
+            "side_length",
+        )
         st.schedule = ScheduleState(**sched_kwargs)
 
         metrics_kwargs = cls._filter_dataclass_kwargs(MetricsState, d.get("metrics", {}))
@@ -109,6 +125,8 @@ class OptimState:
     def from_config(cls, config: MainConfig) -> "OptimState":
         st = cls()
         st.schedule.healpix_order = int(config.pose_search.init_healpix_order)
+        st.schedule.trans_grid_extent = float(config.pose_search.init_trans_grid_extent)
         st.schedule.proj_cache_backend = "memory" if bool(config.scheduler.use_cache) else "none"
+        st.schedule.full_backprojection = bool(config.reconstruction.full_backprojection)
 
         return st

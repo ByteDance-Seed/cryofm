@@ -1,6 +1,19 @@
-"""
-Implementation of Yershova et al. "Generating uniform incremental
-grids on SO(3) using the Hopf fribration"
+"""SO(3) grid utilities based on the Hopf-fibration construction.
+
+This implementation follows the incremental SO(3) grid parameterization from
+Yershova et al., "Generating uniform incremental grids on SO(3) using the
+Hopf fibration."
+
+Compared with the reference construction, this file also includes several
+engineering-oriented adaptations used by the search code:
+
+1. Cached HEALPix angle tables to avoid repeated ``healpy.pix2ang`` calls for
+   standard resolutions.
+2. Tensor-friendly wrappers so the main search path can stay on the active
+   PyTorch device as long as possible.
+3. Batched child expansion and top-k neighbor selection for refinement steps.
+4. A small amount of legacy-compatible NumPy functionality kept for older
+   helper paths.
 """
 
 import json
@@ -15,6 +28,14 @@ from cryoseed.cryoem.rotation import quaternion_to_matrix, matrix_to_quaternion,
 
 
 def grid_s1(resol: int) -> np.ndarray:
+    """Return the S1 grid angles for a resolution level.
+
+    Args:
+        resol: Resolution level of the SO(3) grid.
+
+    Returns:
+        Array of shape ``(6 * 2**resol,)`` containing the S1 fiber angles.
+    """
     Npix = 6 * 2**resol
     dt = 2 * np.pi / Npix
     grid = np.arange(Npix) * dt + dt / 2
@@ -22,6 +43,14 @@ def grid_s1(resol: int) -> np.ndarray:
 
 
 def grid_s2(resol: int):
+    """Return the HEALPix S2 grid angles for a resolution level.
+
+    Args:
+        resol: Resolution level of the SO(3) grid.
+
+    Returns:
+        Tuple ``(theta, phi)`` of arrays with shape ``(12 * 4**resol,)``.
+    """
     Nside = 2**resol
     Npix = 12 * Nside * Nside
     theta, phi = pix2ang(Nside, np.arange(Npix), nest=True)
@@ -29,11 +58,15 @@ def grid_s2(resol: int):
 
 
 def hopf_to_quat(theta, phi, psi) -> np.ndarray:
-    """
-    Hopf coordinates to quaternions
-    theta: [0,pi)
-    phi: [0, 2pi)
-    psi: [0, 2pi)
+    """Convert Hopf coordinates to quaternions.
+
+    Args:
+        theta: Polar angles in ``[0, pi)``.
+        phi: Azimuthal angles in ``[0, 2 * pi)``.
+        psi: Fiber angles in ``[0, 2 * pi)``.
+
+    Returns:
+        Array of shape ``(..., 4)`` with scalar-first quaternions.
     """
     ct = np.cos(theta / 2)
     st = np.sin(theta / 2)
@@ -48,47 +81,102 @@ def hopf_to_quat(theta, phi, psi) -> np.ndarray:
     return quat.T.astype(np.float32)
 
 
+def hopf_to_quat_torch(
+    theta: torch.Tensor, phi: torch.Tensor, psi: torch.Tensor
+) -> torch.Tensor:
+    """Torch variant of :func:`hopf_to_quat`.
+
+    Args:
+        theta: Tensor of polar angles in ``[0, pi)``.
+        phi: Tensor of azimuthal angles in ``[0, 2 * pi)``.
+        psi: Tensor of fiber angles in ``[0, 2 * pi)``.
+
+    Returns:
+        Tensor of shape ``(..., 4)`` with scalar-first quaternions.
+    """
+    ct = torch.cos(theta / 2)
+    st = torch.sin(theta / 2)
+    return torch.stack(
+        [
+            ct * torch.cos(psi / 2),
+            ct * torch.sin(psi / 2),
+            st * torch.cos(phi + psi / 2),
+            st * torch.sin(phi + psi / 2),
+        ],
+        dim=-1,
+    ).to(torch.float32)
+
+
 def grid_SO3(resol: int) -> np.ndarray:
+    """Return the full SO(3) quaternion grid at a resolution level.
+
+    Args:
+        resol: Resolution level of the SO(3) grid.
+
+    Returns:
+        Array of shape ``(N, 4)`` containing the quaternion grid for the
+        corresponding Hopf-fibration discretization.
+    """
     theta, phi = grid_s2(resol)
     psi = grid_s1(resol)
     quat = hopf_to_quat(
-        np.repeat(theta, len(psi)),  # repeats each element by len(psi)
-        np.repeat(phi, len(psi)),  # repeats each element by len(psi)
+        np.repeat(theta, len(psi)),
+        np.repeat(phi, len(psi)),
         np.tile(psi, len(theta)),
-    )  # tiles the array len(theta) times
-    return quat  # hmm convert to rot matrix?
+    )
+    return quat
 
 
 def s2_grid_SO3(resol):
+    """Return the S2-only quaternion grid with zero fiber angle.
+
+    Args:
+        resol: Resolution level of the SO(3) grid.
+
+    Returns:
+        Array of shape ``(12 * 4**resol, 4)`` containing quaternions with
+        ``psi = 0`` for every S2 grid point.
+    """
     theta, phi = grid_s2(resol)
     quat = hopf_to_quat(theta, phi, np.zeros((len(phi),)))
     return quat
 
 
-# Neighbor finding
+# Neighbor lookup helpers.
 
 
 def get_s1_neighbor(mini, curr_res):
-    """
-    Return the 2 nearest neighbors on S1 at the next resolution level
+    """Return candidate S1 children at the next resolution level.
+
+    Args:
+        mini: Parent S1 index at the current resolution.
+        curr_res: Current resolution level.
+
+    Returns:
+        Tuple ``(psi, ind)`` where ``psi`` contains the candidate child angles
+        and ``ind`` contains the matching S1 indices at ``curr_res + 1``.
     """
     Npix = 6 * 2 ** (curr_res + 1)
     dt = 2 * np.pi / Npix
-    # return np.array([2*mini, 2*mini+1])*dt + dt/2
-    # the fiber bundle grid on SO3 is weird
-    # the next resolution level's nearest neighbors in SO3 are not
-    # necessarily the nearest neighbor grid points in S1
-    # include the 13 neighbors for now... eventually learn/memoize the mapping
+    # In the Hopf construction, the nearest SO(3) neighbors at the next level
+    # are not always given by the two direct S1 children alone. Keep a slightly
+    # wider local stencil here and let the quaternion-distance check prune it
+    # down later.
     ind = np.arange(2 * mini - 1, 2 * mini + 3)
     ind = np.mod(ind, Npix)
-    # if ind[0] < 0:
-    #     ind[0] += Npix
     return ind * dt + dt / 2, ind
 
 
 def get_s2_neighbor(mini, cur_res):
-    """
-    Return the 4 nearest neighbors on S2 at the next resolution level
+    """Return the four S2 children at the next resolution level.
+
+    Args:
+        mini: Parent S2 index at the current resolution.
+        cur_res: Current resolution level.
+
+    Returns:
+        Tuple ``((theta, phi), ind)`` for the four HEALPix child pixels at the
+        next resolution level.
     """
     Nside = 2 ** (cur_res + 1)
     ind = np.arange(4) + 4 * mini
@@ -96,33 +184,187 @@ def get_s2_neighbor(mini, cur_res):
 
 
 def get_base_ind(ind, base):
-    """
-    Return the corresponding S2 and S1 grid index for an index on the base SO3 grid
+    """Map flattened SO(3) grid indices to ``(s2_idx, s1_idx)`` pairs.
+
+    Args:
+        ind: Flattened SO(3) grid indices.
+        base: Resolution level of the base SO(3) grid.
+
+    Returns:
+        Array or tensor of shape ``(N, 2)`` storing ``(s2_idx, s1_idx)`` pairs.
     """
     Np = 6 * 2**base
+    if isinstance(ind, torch.Tensor):
+        psii = ind % Np
+        thetai = ind // Np
+        return torch.stack((thetai, psii), dim=1)
+
+    ind = np.asarray(ind)
     psii = ind % Np
     thetai = ind // Np
     return np.stack((thetai, psii), axis=1)
 
 
 def get_neighbor(quat, s2i, s1i, cur_res):
-    """
-    Return the 8 nearest neighbors on SO3 at the next resolution level
+    """Return the eight nearest SO(3) neighbors at the next resolution level.
+
+    Args:
+        quat: Reference quaternion with shape ``(4,)``.
+        s2i: S2 index of the reference pose at the current resolution.
+        s1i: S1 index of the reference pose at the current resolution.
+        cur_res: Current resolution level.
+
+    Returns:
+        Tuple ``(quat_n, ind)`` where ``quat_n`` has shape ``(8, 4)`` and
+        ``ind`` has shape ``(8, 2)`` with the corresponding ``(s2_idx, s1_idx)``
+        pairs at the next resolution level.
     """
     (theta, phi), s2_nexti = get_s2_neighbor(s2i, cur_res)
     psi, s1_nexti = get_s1_neighbor(s1i, cur_res)
+    # Form the 4 x 4 candidate product in vectorized form.
     quat_n = hopf_to_quat(
         np.repeat(theta, len(psi)), np.repeat(phi, len(psi)), np.tile(psi, len(theta))
     )
     ind = np.array([np.repeat(s2_nexti, len(psi)), np.tile(s1_nexti, len(theta))])
     ind = ind.T
-    # find the 8 nearest neighbors of 16 possible points
-    # need to check distance from both +q and -q
+    # Quaternions ``q`` and ``-q`` represent the same rotation.
     dists = np.minimum(
         np.sum((quat_n - quat) ** 2, axis=1), np.sum((quat_n + quat) ** 2, axis=1)
     )
     ii = np.argsort(dists)[:8]
     return quat_n[ii], ind[ii]
+
+
+def subdivide_neighbors(
+    quat: Union[np.ndarray, torch.Tensor],
+    rot_grid_idx: Union[np.ndarray, torch.Tensor],
+    cur_res: int,
+    *,
+    device: torch.device | None = None,
+    quat_dtype: torch.dtype = torch.float32,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Subdivide SO(3) candidates to the next resolution level.
+
+    Args:
+        quat: Quaternions with shape ``(N, 4)``.
+        rot_grid_idx: Grid indices with shape ``(N, 2)`` storing ``(s2_idx, s1_idx)``.
+        cur_res: Current HEALPix resolution level.
+        device: Target device for the returned tensors. Defaults to the input device.
+        quat_dtype: Floating-point dtype for quaternion outputs.
+
+    Returns:
+        Tuple ``(quat, rot_grid_idx, rotmat)`` for the next resolution level.
+
+    Notes:
+        The original implementation expanded one parent at a time in Python and
+        then converted the results back to tensors. This version keeps the same
+        neighborhood definition but performs the 4 x 4 child expansion, distance
+        evaluation, and top-k selection in batch to reduce Python overhead on
+        the main refinement path.
+    """
+    if device is None:
+        if isinstance(quat, torch.Tensor):
+            device = quat.device
+        elif isinstance(rot_grid_idx, torch.Tensor):
+            device = rot_grid_idx.device
+        else:
+            device = torch.device("cpu")
+
+    quat_t = torch.as_tensor(quat, device=device, dtype=quat_dtype)
+    rot_grid_idx_t = torch.as_tensor(rot_grid_idx, device=device, dtype=torch.long)
+
+    if rot_grid_idx_t.ndim == 3 and rot_grid_idx_t.shape[0] == 1:
+        rot_grid_idx_t = rot_grid_idx_t.squeeze(0)
+
+    N_sel = quat_t.shape[0]
+    if quat_t.ndim != 2 or quat_t.shape != (N_sel, 4):
+        raise ValueError(f"quat must have shape ({N_sel}, 4), got {tuple(quat_t.shape)}")
+    if rot_grid_idx_t.ndim != 2 or rot_grid_idx_t.shape != (N_sel, 2):
+        raise ValueError(
+            f"rot_grid_idx must have shape ({N_sel}, 2), got {tuple(rot_grid_idx_t.shape)}"
+        )
+
+    s2_max = 12 * (4**cur_res)
+    s1_max = 6 * (2**cur_res)
+    if not torch.all((rot_grid_idx_t[:, 0] >= 0) & (rot_grid_idx_t[:, 0] < s2_max)):
+        raise ValueError("s2i out of range")
+    if not torch.all((rot_grid_idx_t[:, 1] >= 0) & (rot_grid_idx_t[:, 1] < s1_max)):
+        raise ValueError("s1i out of range")
+
+    if N_sel == 0:
+        rot_grid_idx_t = torch.empty((0, 2), device=device, dtype=torch.long)
+        rotmat_t = quaternion_to_matrix(quat_t)
+        return quat_t, rot_grid_idx_t, rotmat_t
+
+    # Each parent pose produces four S2 children and four local S1 candidates.
+    # Their Cartesian product gives 16 SO(3) candidates before pruning.
+    Nside_next = 2 ** (cur_res + 1)
+    Npix_s1_next = 6 * 2 ** (cur_res + 1)
+    dt = float(2 * np.pi / Npix_s1_next)
+
+    s2_nexti = 4 * rot_grid_idx_t[:, 0:1] + torch.arange(4, device=device).view(1, 4)
+    s1_offsets = torch.arange(-1, 3, device=device).view(1, 4)
+    s1_nexti = torch.remainder(2 * rot_grid_idx_t[:, 1:2] + s1_offsets, Npix_s1_next)
+    # ``s2_nexti`` and ``s1_nexti`` both have shape ``(N, 4)``.
+
+    theta_flat, phi_flat = pix2ang_tensor(
+        Nside_next,
+        s2_nexti.reshape(-1),
+        nest=True,
+        device=device,
+        dtype=quat_t.dtype,
+    )
+    # ``theta`` and ``phi`` have shape ``(N, 4)`` after reshaping the flattened lookup.
+    theta = theta_flat.reshape(N_sel, 4)
+    phi = phi_flat.reshape(N_sel, 4)
+    psi = s1_nexti.to(quat_t.dtype) * dt + dt / 2  # Shape: ``(N, 4)``.
+
+    # Broadcast the 4 x 4 child product to shape ``(N, 4, 4)`` before flattening.
+    theta_grid = theta[:, :, None].expand(-1, -1, 4)
+    phi_grid = phi[:, :, None].expand(-1, -1, 4)
+    psi_grid = psi[:, None, :].expand(-1, 4, -1)
+
+    # Convert all candidates to quaternions in batch, then reshape to ``(N, 16, 4)``.
+    quat_candidates = hopf_to_quat_torch(
+        theta_grid.reshape(-1),
+        phi_grid.reshape(-1),
+        psi_grid.reshape(-1),
+    ).reshape(N_sel, 16, 4)
+
+    # Store the matching ``(s2_idx, s1_idx)`` pairs with shape ``(N, 16, 2)``.
+    candidate_indices = torch.stack(
+        [
+            s2_nexti[:, :, None].expand(-1, -1, 4),
+            s1_nexti[:, None, :].expand(-1, 4, -1),
+        ],
+        dim=-1,
+    ).reshape(N_sel, 16, 2)
+
+    # Quaternions ``q`` and ``-q`` encode the same rotation, so compare against
+    # both signs and keep the smaller distance.
+    diff_pos = quat_candidates - quat_t[:, None, :]  # Shape: ``(N, 16, 4)``.
+    diff_neg = quat_candidates + quat_t[:, None, :]  # Shape: ``(N, 16, 4)``.
+    dists = torch.minimum(
+        diff_pos.square().sum(dim=2),
+        diff_neg.square().sum(dim=2),
+    )  # Shape: ``(N, 16)``.
+
+    top_k = min(8, quat_candidates.shape[1])
+    # Select the closest child candidates independently for each parent pose.
+    top_idx = torch.topk(dists, k=top_k, dim=1, largest=False, sorted=True).indices
+
+    quat_t = torch.gather(
+        quat_candidates,
+        1,
+        top_idx[:, :, None].expand(-1, -1, quat_candidates.shape[-1]),
+    ).reshape(-1, 4)  # Shape: ``(N * top_k, 4)``.
+    rot_grid_idx_t = torch.gather(
+        candidate_indices,
+        1,
+        top_idx[:, :, None].expand(-1, -1, candidate_indices.shape[-1]),
+    ).reshape(-1, 2)  # Shape: ``(N * top_k, 2)``.
+    rotmat_t = quaternion_to_matrix(quat_t)
+    return quat_t, rot_grid_idx_t, rotmat_t
 
 
 try:
@@ -133,6 +375,8 @@ except IOError:
         "WARNING: Couldn't load cached healpy grid; will fall back to importing healpy"
     )
     _GRIDS = None
+
+_GRID_TENSOR_CACHE: dict[tuple[int, str, int | None, torch.dtype], torch.Tensor] = {}
 
 
 def pix2ang(Nside, ipix, nest=False, lonlat=False):
@@ -148,18 +392,73 @@ def pix2ang(Nside, ipix, nest=False, lonlat=False):
         return healpy.pix2ang(Nside, ipix, nest=nest, lonlat=lonlat)
 
 
-def get_s2_k_step_neighbors(center_pix, k_steps, cur_res):
-    """
-    Find all S2 pixels within k steps of the center pixel using BFS
+def pix2ang_tensor(
+    Nside: int,
+    ipix: Union[np.ndarray, torch.Tensor],
+    *,
+    nest: bool = False,
+    lonlat: bool = False,
+    device: torch.device | None = None,
+    dtype: torch.dtype = torch.float32,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Torch-friendly angle lookup using cached HEALPix tables when available.
 
     Args:
-        center_pix: int, center pixel index
-        k_steps: int, maximum number of steps
-        cur_res: int, current resolution level
+        Nside: HEALPix ``Nside`` parameter.
+        ipix: HEALPix pixel indices.
+        nest: Whether to interpret ``ipix`` in nested ordering.
+        lonlat: Whether to return longitude/latitude instead of ``(theta, phi)``.
+        device: Target device for the returned tensors.
+        dtype: Floating-point dtype of the returned angle tensors.
+
+    For standard cached resolutions, this avoids a round-trip through NumPy for
+    every lookup by materializing the precomputed angle table directly on the
+    requested device. For uncached resolutions, it falls back to the existing
+    NumPy / healpy path and converts the result back to tensors.
 
     Returns:
-        neighbor_pixels: list of pixel indices within k steps
-        step_levels: list of step distances for each neighbor
+        Tuple ``(theta, phi)`` as tensors with the same logical shape as ``ipix``.
+    """
+    if device is None:
+        device = ipix.device if isinstance(ipix, torch.Tensor) else torch.device("cpu")
+
+    if _GRIDS is not None and Nside in _GRIDS and nest and not lonlat:
+        dev = torch.device(device)
+        cache_key = (Nside, dev.type, dev.index, dtype)
+        grid_t = _GRID_TENSOR_CACHE.get(cache_key)
+        if grid_t is None:
+            # Cache one tensor copy per (resolution, device, dtype) so repeated
+            # refinement steps can reuse the same HEALPix angle table.
+            grid_t = torch.from_numpy(_GRIDS[Nside]).to(device=dev, dtype=dtype)
+            _GRID_TENSOR_CACHE[cache_key] = grid_t
+
+        ipix_t = torch.as_tensor(ipix, device=dev, dtype=torch.long)
+        angles = grid_t.index_select(0, ipix_t.reshape(-1)).reshape(*ipix_t.shape, 2)
+        return angles[..., 0], angles[..., 1]
+
+    if isinstance(ipix, torch.Tensor):
+        ipix_np = ipix.detach().cpu().numpy()
+    else:
+        ipix_np = np.asarray(ipix)
+
+    theta, phi = pix2ang(Nside, ipix_np, nest=nest, lonlat=lonlat)
+    theta_t = torch.as_tensor(theta, device=device, dtype=dtype)
+    phi_t = torch.as_tensor(phi, device=device, dtype=dtype)
+    return theta_t, phi_t
+
+
+def get_s2_k_step_neighbors(center_pix, k_steps, cur_res):
+    """Return all S2 pixels within ``k_steps`` graph steps of ``center_pix``.
+
+    Args:
+        center_pix: Center S2 pixel index.
+        k_steps: Neighborhood radius in graph steps.
+        cur_res: Current resolution level.
+
+    Returns:
+        Tuple ``(neighbor_pixels, step_levels)`` where both arrays have shape
+        ``(N,)`` and ``step_levels[i]`` stores the BFS layer for
+        ``neighbor_pixels[i]``.
     """
     try:
         import healpy
@@ -168,17 +467,17 @@ def get_s2_k_step_neighbors(center_pix, k_steps, cur_res):
 
     Nside = 2**cur_res
 
-    # BFS to find k-step neighbors
+    # Breadth-first search over the HEALPix neighborhood graph. This helper is
+    # mostly used by the local-sampling utilities rather than the main hot path.
     visited = set()
-    neighbors_by_step = {0: [center_pix]}  # step -> list of pixels at that step
-    queue = [(center_pix, 0)]  # (pixel_index, current_step)
+    neighbors_by_step = {0: [center_pix]}
+    queue = [(center_pix, 0)]
     visited.add(center_pix)
 
     while queue:
         current_pix, current_step = queue.pop(0)
 
         if current_step < k_steps:
-            # Get immediate neighbors of current pixel
             immediate_neighbors = healpy.get_all_neighbours(
                 Nside, current_pix, nest=True
             )
@@ -195,10 +494,9 @@ def get_s2_k_step_neighbors(center_pix, k_steps, cur_res):
 
                     queue.append((neighbor_pix, next_step))
 
-    # Flatten all neighbors and their step levels
+    # Flatten the BFS layers while keeping the step count for each entry.
     all_neighbors = []
     step_levels = []
-    # Negiable ???
     for step in range(k_steps + 1):
         if step in neighbors_by_step:
             all_neighbors.extend(neighbors_by_step[step])
@@ -208,35 +506,28 @@ def get_s2_k_step_neighbors(center_pix, k_steps, cur_res):
 
 
 def sample_s2_higher_resolution(neighbor_pixels, cur_res, target_res):
-    """
-    Sample S2 pixels at higher resolution within the k-step neighborhood
+    """Expand an S2 neighborhood from ``cur_res`` to ``target_res``.
 
     Args:
-        neighbor_pixels: array of pixel indices at current resolution
-        cur_res: int, current resolution level
-        target_res: int, target higher resolution level
+        neighbor_pixels: S2 pixel indices at the current resolution.
+        cur_res: Current resolution level.
+        target_res: Target resolution level.
 
     Returns:
-        high_res_pixels: array of pixel indices at target resolution
-        angles: (theta, phi) coordinates of high-res pixels
+        Tuple ``(high_res_pixels, (theta, phi))`` containing the expanded S2
+        indices and their angles at the target resolution.
     """
     if target_res <= cur_res:
         raise ValueError("Target resolution must be higher than current resolution")
 
-    # Calculate subdivision factor
     subdivision_factor = 4 ** (target_res - cur_res)
 
-    high_res_pixels = []
+    neighbor_pixels = np.asarray(neighbor_pixels, dtype=np.int64)
+    child_offsets = np.arange(subdivision_factor, dtype=np.int64)
+    high_res_pixels = (
+        neighbor_pixels[:, None] * subdivision_factor + child_offsets[None, :]
+    ).reshape(-1)
 
-    for pix in neighbor_pixels:
-        # Each pixel at cur_res maps to subdivision_factor pixels at target_res
-        start_pix = pix * subdivision_factor
-        end_pix = start_pix + subdivision_factor
-        high_res_pixels.extend(range(start_pix, end_pix))
-
-    high_res_pixels = np.array(high_res_pixels)
-
-    # Get angles for high-resolution pixels
     Nside_target = 2**target_res
     theta, phi = pix2ang(Nside_target, high_res_pixels, nest=True)
 
@@ -244,24 +535,24 @@ def sample_s2_higher_resolution(neighbor_pixels, cur_res, target_res):
 
 
 def get_s2_local_sampling(center_pix, k_steps, cur_res, target_res):
-    """
-    Complete pipeline: find k-step neighbors and sample at higher resolution
+    """Return a local S2 neighborhood sampled at a higher resolution.
 
     Args:
-        center_pix: int, center pixel index at current resolution
-        k_steps: int, neighborhood radius in steps
-        cur_res: int, current resolution level
-        target_res: int, target sampling resolution
+        center_pix: Center S2 pixel index at the current resolution.
+        k_steps: Neighborhood radius in graph steps.
+        cur_res: Current resolution level.
+        target_res: Target resolution level used for sampling.
 
     Returns:
-        high_res_pixels: pixel indices at target resolution
-        angles: (theta, phi) coordinates
-        original_neighbors: original k-step neighbors at current resolution
+        Tuple ``(high_res_pixels, angles, neighbor_pixels)`` where
+        ``high_res_pixels`` are the target-resolution samples, ``angles`` is the
+        matching ``(theta, phi)`` tuple, and ``neighbor_pixels`` are the coarse
+        S2 neighbors before subdivision.
     """
-    # Step 1: Find k-step neighbors at current resolution
+    # Step 1: Find the coarse k-step neighborhood on the current S2 grid.
     neighbor_pixels, step_levels = get_s2_k_step_neighbors(center_pix, k_steps, cur_res)
 
-    # Step 2: Sample at higher resolution within this neighborhood
+    # Step 2: Subdivide that neighborhood onto the target S2 resolution.
     high_res_pixels, angles = sample_s2_higher_resolution(
         neighbor_pixels, cur_res, target_res
     )
@@ -270,100 +561,67 @@ def get_s2_local_sampling(center_pix, k_steps, cur_res, target_res):
 
 
 def get_s1_local_sampling(center_s1_idx, k_steps, cur_res, target_res):
-    """
-    Sample S1 indices at higher resolution within the k-step neighborhood
+    """Return a local S1 neighborhood sampled at a higher resolution.
 
     Args:
-        center_s1_idx: int, center S1 index at current resolution
-        k_steps: int, maximum number of steps for neighborhood
-        cur_res: int, current resolution level
-        target_res: int, target higher resolution level
+        center_s1_idx: Center S1 index at the current resolution.
+        k_steps: Neighborhood radius on the periodic S1 grid.
+        cur_res: Current resolution level.
+        target_res: Target resolution level used for sampling.
 
     Returns:
-        high_res_s1_indices: array of S1 indices at target resolution
-        angles: array of psi angles (in radians)
-        original_neighbors: original k-step neighbors at current resolution
+        Tuple ``(high_res_s1_indices, psi_angles, neighbor_s1_indices)`` with the
+        target-resolution S1 indices, their fiber angles, and the coarse S1
+        neighbors before subdivision.
     """
     if target_res <= cur_res:
         raise ValueError("Target resolution must be higher than current resolution")
 
-    # Get S1 grid size at current resolution
+    # Step 1: Enumerate the local neighborhood on the coarse periodic S1 grid.
     Npix_s1_cur = 6 * 2**cur_res
 
-    # Find k-step neighbors at current resolution using BFS
-    visited = set()
-    neighbors_by_step = {0: [center_s1_idx]}
-    queue = [(center_s1_idx, 0)]
-    visited.add(center_s1_idx)
+    # S1 is a periodic 1D grid, so the k-step neighborhood can be written in
+    # closed form without an explicit BFS.
+    if k_steps == 0:
+        offsets = np.array([0], dtype=np.int64)
+    else:
+        step_offsets = np.arange(1, k_steps + 1, dtype=np.int64)
+        offsets = np.concatenate(
+            ([0], np.column_stack((-step_offsets, step_offsets)).ravel())
+        )
 
-    while queue:
-        current_idx, current_step = queue.pop(0)
+    neighbor_s1_indices = (center_s1_idx + offsets) % Npix_s1_cur
+    _, unique_idx = np.unique(neighbor_s1_indices, return_index=True)
+    neighbor_s1_indices = neighbor_s1_indices[np.sort(unique_idx)]
 
-        if current_step < k_steps:
-            # Get immediate neighbors (wrap around for circular S1)
-            immediate_neighbors = [
-                (current_idx - 1) % Npix_s1_cur,
-                (current_idx + 1) % Npix_s1_cur,
-            ]
-
-            for neighbor_idx in immediate_neighbors:
-                if neighbor_idx not in visited:
-                    visited.add(neighbor_idx)
-                    next_step = current_step + 1
-
-                    if next_step not in neighbors_by_step:
-                        neighbors_by_step[next_step] = []
-                    neighbors_by_step[next_step].append(neighbor_idx)
-
-                    queue.append((neighbor_idx, next_step))
-
-    # Flatten all k-step neighbors
-    all_neighbors = []
-    for step in range(k_steps + 1):
-        if step in neighbors_by_step:
-            all_neighbors.extend(neighbors_by_step[step])
-
-    neighbor_s1_indices = np.array(all_neighbors)
-
-    # Sample at higher resolution using subdivision
-    # Each S1 index at cur_res maps to multiple indices at target_res
+    # Step 2: Expand each coarse S1 bin into its children at the target resolution.
     subdivision_factor = 2 ** (target_res - cur_res)
+    child_offsets = np.arange(subdivision_factor, dtype=np.int64)
+    high_res_s1_indices = (
+        neighbor_s1_indices[:, None] * subdivision_factor + child_offsets[None, :]
+    ).reshape(-1)
 
-    high_res_s1_indices = []
-    for s1_idx in neighbor_s1_indices:
-        # Each S1 index subdivides into consecutive indices
-        start_idx = s1_idx * subdivision_factor
-        end_idx = start_idx + subdivision_factor
-        high_res_s1_indices.extend(range(start_idx, end_idx))
-
-    high_res_s1_indices = np.array(high_res_s1_indices)
-
-    # Convert to angles (psi values)
+    # Step 3: Convert target-level S1 indices back to fiber angles.
     Npix_s1_target = 6 * 2**target_res
     dt = 2 * np.pi / Npix_s1_target
-    psi_angles = high_res_s1_indices * dt + dt / 2  # Center of each bin
+    psi_angles = high_res_s1_indices * dt + dt / 2
 
     return high_res_s1_indices, psi_angles, neighbor_s1_indices
 
 
 def get_so3_neighbor_current_res(quat, s2_idx, s1_idx, cur_res, n_neighbors=8):
-    """
-    Fengyu:
-        TODO: Maybe find a better metric instead of ||q1-q2||.
-
-    Get SO(3) neighbors at the CURRENT resolution level using healpy
-    Similar to get_neighbor but for current resolution instead of next resolution
+    """Return SO(3) neighbors at the current resolution level.
 
     Args:
-        quat: (4,) quaternion at current resolution
-        s2_idx: int, S2 index at current resolution
-        s1_idx: int, S1 index at current resolution
-        cur_res: int, current resolution level
-        n_neighbors: int, number of neighbors to return (default 8)
+        quat: Reference quaternion with shape ``(4,)``.
+        s2_idx: S2 index of the reference pose.
+        s1_idx: S1 index of the reference pose.
+        cur_res: Current resolution level.
+        n_neighbors: Number of nearest neighbors to keep.
 
     Returns:
-        neighbor_quats: (n_neighbors, 4) array of neighbor quaternions
-        neighbor_indices: (n_neighbors, 2) array of [s2_idx, s1_idx] pairs
+        Tuple ``(neighbor_quats, neighbor_indices)`` containing the selected
+        quaternions and their ``(s2_idx, s1_idx)`` pairs.
     """
     try:
         import healpy
@@ -373,32 +631,30 @@ def get_so3_neighbor_current_res(quat, s2_idx, s1_idx, cur_res, n_neighbors=8):
     Nside = 2**cur_res
     Npix_s1 = 6 * 2**cur_res
 
-    # Get S2 neighbors at current resolution
     s2_neighbors = healpy.get_all_neighbours(Nside, s2_idx, nest=True)
-    s2_neighbors = s2_neighbors[s2_neighbors != -1]  # Remove invalid neighbors
-    s2_neighbors = np.append(s2_neighbors, s2_idx)  # Include center
+    s2_neighbors = s2_neighbors[s2_neighbors != -1]
+    s2_neighbors = np.append(s2_neighbors, s2_idx)
 
-    # Get extended S1 neighbors at current resolution (vectorized)
-    s1_offsets = np.arange(-2, 3)  # [-2, -1, 0, 1, 2]
+    # Use a small local S1 stencil around the current fiber index. As in
+    # ``get_s1_neighbor()``, the local Hopf geometry is not captured by the two
+    # direct children alone.
+    s1_offsets = np.arange(-2, 3)
     s1_neighbors = (s1_idx + s1_offsets) % Npix_s1
 
-    # Create all combinations using meshgrid (vectorized)
     s2_mesh, s1_mesh = np.meshgrid(s2_neighbors, s1_neighbors, indexing="ij")
     candidate_indices = np.column_stack([s2_mesh.ravel(), s1_mesh.ravel()])
+    # ``candidate_indices`` has shape ``(N_candidates, 2)``.
 
-    # Convert all candidates to quaternions (vectorized)
     s2_indices = candidate_indices[:, 0]
     s1_indices = candidate_indices[:, 1]
 
-    # Get angles (vectorized)
     theta, phi = pix2ang(Nside, s2_indices, nest=True)
     dt = 2 * np.pi / Npix_s1
     psi = s1_indices * dt + dt / 2
 
-    # Convert to quaternions (vectorized)
+    # Convert all candidates to quaternions in vectorized form.
     candidate_quats = hopf_to_quat(theta, phi, psi)
 
-    # Remove the center point (vectorized boolean indexing)
     center_mask = ~(
         (candidate_indices[:, 0] == s2_idx) & (candidate_indices[:, 1] == s1_idx)
     )
@@ -408,25 +664,23 @@ def get_so3_neighbor_current_res(quat, s2_idx, s1_idx, cur_res, n_neighbors=8):
     if len(candidate_quats) == 0:
         return np.array([]), np.array([])
 
-    # Calculate quaternion distances (vectorized)
     if quat.ndim > 1:
-        quat = quat.flatten()[:4]  # Ensure it's 1D with 4 elements
+        quat = quat.flatten()[:4]
 
-    # Vectorized distance calculation with broadcasting
-    diff_pos = candidate_quats - quat[None, :]  # Shape: (N, 4)
-    diff_neg = candidate_quats + quat[None, :]  # Shape: (N, 4)
+    diff_pos = candidate_quats - quat[None, :]  # Shape: ``(N_candidates, 4)``.
+    diff_neg = candidate_quats + quat[None, :]  # Shape: ``(N_candidates, 4)``.
 
-    dist_pos = np.sum(diff_pos**2, axis=1)  # Shape: (N,)
-    dist_neg = np.sum(diff_neg**2, axis=1)  # Shape: (N,)
+    dist_pos = np.sum(diff_pos**2, axis=1)
+    dist_neg = np.sum(diff_neg**2, axis=1)
 
     dists = np.minimum(dist_pos, dist_neg)
 
-    # Select the n_neighbors closest candidates (vectorized)
     n_to_select = min(n_neighbors, len(candidate_quats))
-    closest_indices = np.argpartition(dists, n_to_select)[:n_to_select]
-
-    # Sort the selected neighbors by distance
-    closest_sorted = closest_indices[np.argsort(dists[closest_indices])]
+    if n_to_select == len(candidate_quats):
+        closest_sorted = np.argsort(dists)
+    else:
+        closest_indices = np.argpartition(dists, n_to_select - 1)[:n_to_select]
+        closest_sorted = closest_indices[np.argsort(dists[closest_indices])]
 
     neighbor_quats = candidate_quats[closest_sorted]
     neighbor_indices = candidate_indices[closest_sorted]
@@ -437,20 +691,19 @@ def get_so3_neighbor_current_res(quat, s2_idx, s1_idx, cur_res, n_neighbors=8):
 def get_so3_k_step_neighbors(
     center_quat, center_s2_idx, center_s1_idx, k_steps, cur_res
 ):
-    """
-    Find k-step neighbors in SO(3) space using current resolution neighbors
+    """Return the SO(3) neighborhood within ``k_steps`` BFS layers.
 
     Args:
-        center_quat: (4,) center quaternion
-        center_s2_idx: int, center S2 index
-        center_s1_idx: int, center S1 index
-        k_steps: int, maximum number of steps
-        cur_res: int, current resolution level
+        center_quat: Center quaternion with shape ``(4,)``.
+        center_s2_idx: Center S2 index.
+        center_s1_idx: Center S1 index.
+        k_steps: Neighborhood radius in BFS layers.
+        cur_res: Current resolution level.
 
     Returns:
-        neighbor_quats: (N, 4) array of neighbor quaternions
-        neighbor_indices: (N, 2) array of [s2_idx, s1_idx] pairs
-        step_levels: (N,) array of step distances
+        Tuple ``(neighbor_quats, neighbor_indices, step_levels)`` storing the
+        discovered quaternions, their grid indices, and the BFS layer of each
+        entry.
     """
     visited = set()
     neighbors_by_step = {0: [(center_quat, center_s2_idx, center_s1_idx)]}
@@ -461,7 +714,6 @@ def get_so3_k_step_neighbors(
         current_quat, current_s2, current_s1, current_step = queue.pop(0)
 
         if current_step < k_steps:
-            # Use the new function to get neighbors at current resolution
             neighbor_quats, neighbor_indices = get_so3_neighbor_current_res(
                 current_quat, current_s2, current_s1, cur_res
             )
@@ -479,7 +731,6 @@ def get_so3_k_step_neighbors(
 
                     queue.append((n_quat, n_s2, n_s1, next_step))
 
-    # Flatten all neighbors
     all_quats = []
     all_indices = []
     step_levels = []
@@ -495,51 +746,44 @@ def get_so3_k_step_neighbors(
 
 
 def sample_so3_higher_resolution(neighbor_indices, cur_res, target_res):
-    """
-    Sample SO(3) at higher resolution within the k-step neighborhood
+    """Expand an SO(3) neighborhood from ``cur_res`` to ``target_res``.
 
     Args:
-        neighbor_indices: (N, 2) array of [s2_idx, s1_idx] at current resolution
-        cur_res: int, current resolution level
-        target_res: int, target higher resolution level
+        neighbor_indices: Array of shape ``(N, 2)`` storing coarse
+            ``(s2_idx, s1_idx)`` pairs.
+        cur_res: Current resolution level.
+        target_res: Target resolution level.
 
     Returns:
-        high_res_indices: (M, 2) array of [s2_idx, s1_idx] at target resolution
-        high_res_quats: (M, 4) array of quaternions at target resolution
-        high_res_rots: (M, 3, 3) tensor of rotation matrices
+        Tuple ``(high_res_indices, high_res_quats, high_res_rots, angles)``
+        containing the expanded indices, quaternions, rotation matrices, and the
+        corresponding ``(theta, phi, psi)`` angles.
     """
     if target_res <= cur_res:
         raise ValueError("Target resolution must be higher than current resolution")
 
-    # Calculate subdivision factors
     s2_subdivision_factor = 4 ** (target_res - cur_res)
     s1_subdivision_factor = 2 ** (target_res - cur_res)
 
-    high_res_indices = []
+    neighbor_indices = np.asarray(neighbor_indices, dtype=np.int64)
+    s2_offsets, s1_offsets = np.meshgrid(
+        np.arange(s2_subdivision_factor, dtype=np.int64),
+        np.arange(s1_subdivision_factor, dtype=np.int64),
+        indexing="ij",
+    )
+    high_res_indices = np.stack(
+        [
+            neighbor_indices[:, 0, None, None] * s2_subdivision_factor
+            + s2_offsets[None, :, :],
+            neighbor_indices[:, 1, None, None] * s1_subdivision_factor
+            + s1_offsets[None, :, :],
+        ],
+        axis=-1,
+    ).reshape(-1, 2)
 
-    for s2_idx, s1_idx in neighbor_indices:
-        # Subdivide S2 index
-        s2_start = s2_idx * s2_subdivision_factor
-        s2_end = s2_start + s2_subdivision_factor
-        s2_children = list(range(s2_start, s2_end))
-
-        # Subdivide S1 index
-        s1_start = s1_idx * s1_subdivision_factor
-        s1_end = s1_start + s1_subdivision_factor
-        s1_children = list(range(s1_start, s1_end))
-
-        # Create all combinations
-        for s2_child in s2_children:
-            for s1_child in s1_children:
-                high_res_indices.append([s2_child, s1_child])
-
-    high_res_indices = np.array(high_res_indices)
-
-    # Convert to quaternions and rotation matrices
     s2_indices = high_res_indices[:, 0]
     s1_indices = high_res_indices[:, 1]
 
-    # Get angles
     Nside_target = 2**target_res
     theta, phi = pix2ang(Nside_target, s2_indices, nest=True)
 
@@ -547,10 +791,8 @@ def sample_so3_higher_resolution(neighbor_indices, cur_res, target_res):
     dt = 2 * np.pi / Npix_s1_target
     psi = s1_indices * dt + dt / 2
 
-    # Convert to quaternions
     high_res_quats = hopf_to_quat(theta, phi, psi)
 
-    # Convert to rotation matrices
     high_res_rots = quaternion_to_matrix(torch.from_numpy(high_res_quats))
 
     return high_res_indices, high_res_quats, high_res_rots, (theta, phi, psi)
@@ -559,40 +801,38 @@ def sample_so3_higher_resolution(neighbor_indices, cur_res, target_res):
 def get_so3_local_sampling(
     center_quat, center_s2_idx, center_s1_idx, k_steps, cur_res, target_res
 ):
-    """
-    Complete SO(3) local sampling using proper SO(3) neighbors
+    """Return local SO(3) samples around a center pose.
 
     Args:
-        center_quat: (4,) center quaternion
-        center_s2_idx: int, center S2 index
-        center_s1_idx: int, center S1 index
-        k_steps: int, neighborhood radius in steps
-        cur_res: int, current resolution level
-        target_res: int, target sampling resolution
+        center_quat: Center quaternion with shape ``(4,)``.
+        center_s2_idx: Center S2 index at the current resolution.
+        center_s1_idx: Center S1 index at the current resolution.
+        k_steps: Neighborhood radius in SO(3) graph steps.
+        cur_res: Current resolution level.
+        target_res: Target resolution level used for sampling.
 
     Returns:
-        high_res_indices: (N, 2) array of [s2_idx, s1_idx] pairs
-        high_res_quats: (N, 4) array of quaternions
-        high_res_rots: (N, 3, 3) tensor of rotation matrices
-        original_neighbors: original k-step neighbors at current resolution
+        Tuple ``(indices, quats, rots, angles)`` describing the local SO(3)
+        samples at the target resolution.
     """
-    # Step 1: Find k-step neighbors in SO(3) space
+    # Step 1: Find the SO(3) neighborhood at the current resolution.
     neighbor_quats, neighbor_indices, step_levels = get_so3_k_step_neighbors(
         center_quat, center_s2_idx, center_s1_idx, k_steps, cur_res
     )
     if target_res > cur_res:
-        # Step 2: Sample at higher resolution within this neighborhood
+        # Step 2: Subdivide the coarse neighborhood onto the target resolution.
         indices, quats, rots, angles = sample_so3_higher_resolution(
             neighbor_indices, cur_res, target_res
         )
     elif target_res == cur_res:
+        # Step 2: Reuse the coarse neighborhood directly when no subdivision is needed.
         indices = neighbor_indices
         quats = neighbor_quats
         rots = quaternion_to_matrix(torch.from_numpy(neighbor_quats))
         s2_indices = indices[:, 0]
         s1_indices = indices[:, 1]
 
-        # Get angles
+        # Step 3: Recover the angle parameterization for the selected grid points.
         Nside_target = 2**target_res
         theta, phi = pix2ang(Nside_target, s2_indices, nest=True)
 
@@ -607,74 +847,66 @@ def get_so3_local_sampling(
     return indices, quats, rots, angles
 
 
-# Example usage function for your LocalPoseSearcher
-def get_local_s2_poses(center_s2_pix, center_s1_idx, k_steps, cur_res, target_res):
-    """
-    Generate local pose samples around a center pose
+def get_local_s2_poses(
+    center_s2_pix, center_s1_idx, k_steps, cur_res, target_res
+):
+    """Generate local pose samples around a center pose.
 
     Args:
-        center_s2_pix: int, center S2 pixel index
-        center_s1_idx: int, center S1 index
-        k_steps: int, neighborhood radius
-        cur_res: int, current resolution
-        target_res: int, target sampling resolution
+        center_s2_pix: Center S2 pixel index.
+        center_s1_idx: Center S1 index.
+        k_steps: Neighborhood radius.
+        cur_res: Current resolution level.
+        target_res: Target sampling resolution.
 
     Returns:
-        pose_samples: array of (s2_pix, s1_idx) pairs
-        quaternions: corresponding quaternions
+        Tuple ``(pose_samples, quaternions)`` where ``pose_samples`` stores
+        ``(s2_idx, s1_idx)`` pairs and ``quaternions`` stores the corresponding
+        rotations.
     """
-    # Get high-resolution S2 samples
+    # Step 1: Sample the local S2 neighborhood at the target resolution.
     s2_high_res_pixels, (theta, phi), _ = get_s2_local_sampling(
         center_s2_pix, k_steps, cur_res, target_res
     )
 
-    # Get high-resolution S1 samples
+    # Step 2: Sample the local S1 neighborhood at the target resolution.
     s1_high_res_indices, psi_angles, _ = get_s1_local_sampling(
         center_s1_idx, k_steps, cur_res, target_res
     )
 
-    # Create all combinations of S2 and S1 samples
-    pose_samples = []
-    all_theta = []
-    all_phi = []
-    all_psi = []
+    # Step 3: Form the Cartesian product of the S2 and S1 neighborhoods.
+    num_s1 = len(s1_high_res_indices)
+    num_s2 = len(s2_high_res_pixels)
+    pose_samples = np.column_stack(
+        [
+            np.repeat(s2_high_res_pixels, num_s1),
+            np.tile(s1_high_res_indices, num_s2),
+        ]
+    )
+    all_theta = np.repeat(theta, num_s1)
+    all_phi = np.repeat(phi, num_s1)
+    all_psi = np.tile(psi_angles, num_s2)
 
-    for s2_pix, t, p in zip(s2_high_res_pixels, theta, phi):
-        for s1_idx, psi in zip(s1_high_res_indices, psi_angles):
-            pose_samples.append([s2_pix, s1_idx])
-            all_theta.append(t)
-            all_phi.append(p)
-            all_psi.append(psi)
-
-    pose_samples = np.array(pose_samples)
-    all_theta = np.array(all_theta)
-    all_phi = np.array(all_phi)
-    all_psi = np.array(all_psi)
-
-    # Convert to quaternions
+    # Step 4: Convert the local pose samples to quaternions.
     quaternions = hopf_to_quat(all_theta, all_phi, all_psi)
 
     return pose_samples, quaternions
 
 
 def get_quat_from_ind(resol, s2i, s1i):
-    """
-    Convert SO(3) grid indices to Euler angles and quaternions at given resolution
+    """Convert SO(3) grid indices to quaternions at a given resolution.
 
     Args:
-        resol: int, resolution level
-        s2i: int or array, S2 (HEALPix) index
-        s1i: int or array, S1 (circle) index
+        resol: Resolution level of the SO(3) grid.
+        s2i: S2 indices.
+        s1i: S1 indices with the same shape as ``s2i``.
 
     Returns:
-        euler_angles: (N, 3) array of (phi, theta, psi) Euler angles in radians
-        quaternions: (N, 4) array of quaternions
+        Array of shape ``(..., 4)`` containing the corresponding quaternions.
     """
-    # Handle single indices or arrays
     s2i = np.asarray(s2i)
     s1i = np.asarray(s1i)
 
-    # Ensure they're the same shape
     if s2i.shape != s1i.shape:
         raise ValueError("s2i and s1i must have the same shape")
 
@@ -682,22 +914,17 @@ def get_quat_from_ind(resol, s2i, s1i):
     s2i_flat = s2i.flatten()
     s1i_flat = s1i.flatten()
 
-    # Get S2 angles (theta, phi) from HEALPix indices
     Nside = 2**resol
     theta, phi = pix2ang(Nside, s2i_flat, nest=True)
 
-    # Get S1 angles (psi) from S1 indices
     Npix_s1 = 6 * 2**resol
     dt = 2 * np.pi / Npix_s1
     psi = s1i_flat * dt + dt / 2
 
-    # Convert to quaternions using Hopf coordinates
     quaternions = hopf_to_quat(theta, phi, psi)
 
-    # Normalize quaternions
     quaternions /= np.linalg.norm(quaternions, axis=-1, keepdims=True)
 
-    # Reshape back to original shape if needed
     if original_shape:
         quaternions = quaternions.reshape(*original_shape, 4)
 
@@ -705,35 +932,25 @@ def get_quat_from_ind(resol, s2i, s1i):
 
 
 def euler_local_sampling(eulers, target_res, k_steps=1):
-    """
-    Local search around given Euler angles using angular steps from target_res grid
+    """Sample a local Euler-angle neighborhood using grid-derived step sizes.
 
     Args:
-        eulers: torch.Tensor (3,) or (N, 3) Euler angles [φ, θ, ψ] to search around
-        target_res: int, target resolution for angular step size
-        k_steps: int, number of steps to search in each direction (default 1)
+        eulers: Tensor or array with shape ``(3,)`` or ``(N, 3)`` storing
+            ``[phi, theta, psi]`` angles.
+        target_res: Resolution level used to derive angular step sizes.
+        k_steps: Number of steps in each direction.
 
     Returns:
-        candidate_eulers: torch.Tensor (M, 3) of candidate Euler angles [φ, θ, ψ]
-        candidate_quats: torch.Tensor (M, 4) of candidate quaternions
-        candidate_rots: torch.Tensor (M, 3, 3) of rotation matrices
-
-    Note:
-        Angular steps are determined by target_res:
-        - S2 (theta, phi): based on HEALPix resolution
-        - S1 (psi): 2π / (6 * 2^target_res)
+        Tuple ``(candidate_eulers, candidate_quats, candidate_rots)``.
     """
-    # Convert to torch if needed
     if isinstance(eulers, np.ndarray):
         eulers = torch.from_numpy(eulers.astype(np.float32))
 
     if eulers.ndim == 1:
         eulers = eulers.unsqueeze(0)
 
-    # Use input Euler angles directly
-    euler_angles = eulers  # (N, 3) [φ, θ, ψ]
+    euler_angles = eulers
 
-    # Calculate angular steps for target resolution
     Nside_target = 2**target_res
     theta_step = np.sqrt(4 * np.pi / (12 * Nside_target**2))
     phi_step = theta_step
@@ -741,62 +958,51 @@ def euler_local_sampling(eulers, target_res, k_steps=1):
     Npix_s1_target = 6 * 2**target_res
     psi_step = 2 * np.pi / Npix_s1_target
 
-    # Generate perturbation offsets (on CPU, then move to device)
     k_range = torch.arange(-k_steps, k_steps + 1, dtype=torch.float32)
     k_phi_grid, k_theta_grid, k_psi_grid = torch.meshgrid(
         k_range, k_range, k_range, indexing="ij"
     )
-    k_phi_flat = k_phi_grid.reshape(-1)  # Shape: (n_offsets,)
+    # Flatten the 3D offset grid to ``(Q,)`` so it can broadcast against ``(N, 1)`` centers.
+    k_phi_flat = k_phi_grid.reshape(-1)
     k_theta_flat = k_theta_grid.reshape(-1)
     k_psi_flat = k_psi_grid.reshape(-1)
 
-    # Move to same device as eulers
     device = eulers.device
     k_phi_flat = k_phi_flat.to(device)
     k_theta_flat = k_theta_flat.to(device)
     k_psi_flat = k_psi_flat.to(device)
 
-    # Generate candidates for all input quaternions at once
-    # euler_angles: (N, 3), k_flat: (n_offsets,)
-    # We want: (N, n_offsets, 3)
     n_inputs = euler_angles.shape[0]
     n_offsets = k_phi_flat.shape[0]
 
-    # Expand dimensions for broadcasting
-    phi_center = euler_angles[:, 0].unsqueeze(1)  # (N, 1)
-    theta_center = euler_angles[:, 1].unsqueeze(1)
-    psi_center = euler_angles[:, 2].unsqueeze(1)
+    phi_center = euler_angles[:, 0].unsqueeze(1)  # Shape: ``(N, 1)``.
+    theta_center = euler_angles[:, 1].unsqueeze(1)  # Shape: ``(N, 1)``.
+    psi_center = euler_angles[:, 2].unsqueeze(1)  # Shape: ``(N, 1)``.
 
-    # Perturb angles (vectorized over all inputs)
-    phi_candidates = phi_center + k_phi_flat.unsqueeze(0) * phi_step  # (N, n_offsets)
+    # Broadcast center angles against all offset combinations to get ``(N, Q)`` tensors.
+    phi_candidates = phi_center + k_phi_flat.unsqueeze(0) * phi_step
     theta_candidates = theta_center + k_theta_flat.unsqueeze(0) * theta_step
     psi_candidates = psi_center + k_psi_flat.unsqueeze(0) * psi_step
 
-    # Wrap phi to [-π, π] (vectorized)
     phi_candidates = phi_candidates % (2 * np.pi)
     phi_candidates = torch.where(
         phi_candidates > np.pi, phi_candidates - 2 * np.pi, phi_candidates
     )
 
-    # Wrap psi to [-π, π] (vectorized)
     psi_candidates = psi_candidates % (2 * np.pi)
     psi_candidates = torch.where(
         psi_candidates > np.pi, psi_candidates - 2 * np.pi, psi_candidates
     )
 
-    # Clamp theta to [0, π] (vectorized)
     theta_candidates = torch.clamp(theta_candidates, 0, np.pi)
 
-    # Stack and flatten: (N, n_offsets, 3) -> (N*n_offsets, 3)
     candidate_eulers = torch.stack(
         [phi_candidates, theta_candidates, psi_candidates], dim=2
     )
-    candidate_eulers = candidate_eulers.reshape(-1, 3)
+    candidate_eulers = candidate_eulers.reshape(-1, 3)  # Shape: ``(N * Q, 3)``.
 
-    # Convert Euler angles to rotation matrices using euler_to_matrix
-    candidate_rots = euler_to_matrix(candidate_eulers, device=device)
+    candidate_rots = euler_to_matrix(candidate_eulers, device=device)  # Shape: ``(N * Q, 3, 3)``.
 
-    # Convert rotation matrices to quaternions
-    candidate_quats = matrix_to_quaternion(candidate_rots)
+    candidate_quats = matrix_to_quaternion(candidate_rots)  # Shape: ``(N * Q, 4)``.
 
     return candidate_eulers, candidate_quats, candidate_rots

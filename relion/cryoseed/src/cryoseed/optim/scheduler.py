@@ -12,19 +12,32 @@ class FrequencyMarchingScheduler:
         image_size=None,
         particle_diameter=None,
         confidence_threshold=0.1,
+        fsc_resolution_patience=3,
+        fsc_resolution_improvement_threshold=0.0,
+        fsc_resolution_rebound_threshold=1e-2,
         increase_radius_step=10,
         increase_radius_aggressive_factor=0.25,
-        base_healpix_order=2,
+        base_healpix_order=3,
         auto_local_healpix_order=4,
         use_cache=False,
         cache_max_healpix_order=4,
         ssd_cache_min_side_length=150,
+        trans_extent_scale=3.0,
+        full_backprojection=False,
+        num_epochs=None,
     ):
         self.state = state
         self.device = _norm_device(device)
         self.image_size = image_size
         self.particle_diameter = particle_diameter
         self.confidence_threshold = confidence_threshold
+        self.fsc_resolution_patience = int(fsc_resolution_patience)
+        self.fsc_resolution_improvement_threshold = float(
+            fsc_resolution_improvement_threshold
+        )
+        self.fsc_resolution_rebound_threshold = float(
+            fsc_resolution_rebound_threshold
+        )
         self.increase_radius_step = increase_radius_step
         self.increase_radius_aggressive_factor = increase_radius_aggressive_factor
         self.base_healpix_order = base_healpix_order
@@ -32,6 +45,9 @@ class FrequencyMarchingScheduler:
         self.use_cache = bool(use_cache)
         self.cache_max_healpix_order = cache_max_healpix_order
         self.ssd_cache_min_side_length = ssd_cache_min_side_length
+        self.trans_extent_scale = float(trans_extent_scale)
+        self.default_full_backprojection = bool(full_backprojection)
+        self.num_epochs = None if num_epochs is None else int(num_epochs)
 
         orders = torch.arange(1, 11, device=self.device, dtype=torch.float32)
         self.solid_angles_list = torch.rad2deg(4 * torch.pi / (12 * (2.0 ** orders)))
@@ -40,6 +56,15 @@ class FrequencyMarchingScheduler:
         self.image_size = config.data.image_size
         self.particle_diameter = config.data.particle_diameter
         self.confidence_threshold = config.scheduler.confidence_threshold
+        self.fsc_resolution_patience = int(
+            config.scheduler.fsc_resolution_patience
+        )
+        self.fsc_resolution_improvement_threshold = float(
+            config.scheduler.fsc_resolution_improvement_threshold
+        )
+        self.fsc_resolution_rebound_threshold = float(
+            config.scheduler.fsc_resolution_rebound_threshold
+        )
         self.increase_radius_step = config.scheduler.increase_radius_step
         self.increase_radius_aggressive_factor = config.scheduler.increase_radius_aggressive_factor
         self.base_healpix_order = config.scheduler.base_healpix_order
@@ -47,8 +72,50 @@ class FrequencyMarchingScheduler:
         self.use_cache = bool(config.scheduler.use_cache)
         self.cache_max_healpix_order = config.scheduler.cache_max_healpix_order
         self.ssd_cache_min_side_length = config.scheduler.ssd_cache_min_side_length
+        self.trans_extent_scale = float(config.scheduler.trans_extent_scale)
+        self.default_full_backprojection = bool(config.reconstruction.full_backprojection)
+        self.num_epochs = int(config.refinement.num_epochs)
 
         return self
+
+    def _should_force_full_backprojection_for_epoch(self, epoch: int) -> bool:
+        if self.fsc_resolution_patience < 1:
+            raise ValueError("scheduler.fsc_resolution_patience must be >= 1")
+
+        is_last_configured_epoch = (
+            self.num_epochs is not None
+            and epoch >= self.num_epochs - 1
+        )
+        one_epoch_from_convergence = (
+            self.state.progress.num_epochs_without_resolution_gain
+            >= self.fsc_resolution_patience - 1
+        )
+        return is_last_configured_epoch or one_epoch_from_convergence
+
+    def _update_convergence_state(self) -> None:
+        if self.fsc_resolution_patience < 1:
+            raise ValueError("scheduler.fsc_resolution_patience must be >= 1")
+        if self.fsc_resolution_improvement_threshold < 0:
+            raise ValueError(
+                "scheduler.fsc_resolution_improvement_threshold must be >= 0"
+            )
+        if self.fsc_resolution_rebound_threshold < 0:
+            raise ValueError("scheduler.fsc_resolution_rebound_threshold must be >= 0")
+
+        resolution_change = self.state.metrics.fsc_resolution_change
+        if resolution_change is None:
+            self.state.progress.num_epochs_without_resolution_gain = 0
+        elif resolution_change < -self.fsc_resolution_improvement_threshold:
+            self.state.progress.num_epochs_without_resolution_gain = 0
+        elif resolution_change > self.fsc_resolution_rebound_threshold:
+            self.state.progress.num_epochs_without_resolution_gain = 0
+        else:
+            self.state.progress.num_epochs_without_resolution_gain += 1
+
+        self.state.progress.has_converged = (
+            self.state.progress.num_epochs_without_resolution_gain
+            >= self.fsc_resolution_patience
+        )
     
     def step(self):
         """Frequency marching.
@@ -82,6 +149,8 @@ class FrequencyMarchingScheduler:
             raise ValueError("scheduler.base_healpix_order must be >= 2")
         if int(self.auto_local_healpix_order) < 2:
             raise ValueError("scheduler.auto_local_healpix_order must be >= 2")
+        if self.trans_extent_scale < 0:
+            raise ValueError("scheduler.trans_extent_scale must be >= 0")
 
         base_healpix_order = min(
             int(self.base_healpix_order),
@@ -184,6 +253,20 @@ class FrequencyMarchingScheduler:
         if self.state.schedule.side_length > self.image_size:
             self.state.schedule.side_length = self.image_size
 
+        # Update translation grid extent
+        prev_trans_grid_extent = float(self.state.schedule.trans_grid_extent)
+        target_trans_grid_extent = (
+            self.trans_extent_scale * float(self.state.metrics.trans_update_rms)
+        )
+        # Keep translation-range updates within a fixed multiplicative window based on
+        # the previous extent.
+        min_trans_grid_extent = 0.5 * prev_trans_grid_extent
+        max_trans_grid_extent = 2.0 * prev_trans_grid_extent
+        self.state.schedule.trans_grid_extent = min(
+            max(target_trans_grid_extent, min_trans_grid_extent),
+            max_trans_grid_extent,
+        )
+
         # Cache configuration
         if not self.use_cache:
             self.state.schedule.proj_cache_backend = "none"
@@ -194,6 +277,21 @@ class FrequencyMarchingScheduler:
                 self.state.schedule.proj_cache_backend = "memory"
         else:
             self.state.schedule.proj_cache_backend = "none"
+
+        # Update convergence statistics from the current epoch before planning
+        # execution flags for the next epoch.
+        self._update_convergence_state()
+
+        # full_backprojection belongs to the next schedule. Force it on for
+        # the final configured epoch, or when the current convergence state
+        # indicates the refinement is one epoch away from being declared
+        # converged.
+        next_epoch = int(self.state.progress.epoch) + 1
+        next_epoch_full_backprojection = (
+            self.default_full_backprojection
+            or self._should_force_full_backprojection_for_epoch(next_epoch)
+        )
+        self.state.schedule.full_backprojection = next_epoch_full_backprojection
 
         # Reset confidence sum and count for next iteration
         self.state.metrics.confidence_sum = 0.0

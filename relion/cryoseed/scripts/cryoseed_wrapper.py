@@ -7,7 +7,7 @@ to the CryoFM2 inference CLI. HomoRefine launches one wrapper per half (`half0` 
 waits and exits.
 
 Example:
-export CRYOSEED_EXTERNAL_RECONSTRUCT_EXECUTABLE="python /path/to/cryoseed_wrapper.py --model-dir /path/to/model_dir"
+export CRYOSEED_EXTERNAL_RECONSTRUCT_EXECUTABLE="python /path/to/cryoseed_wrapper.py --model-dir /path/to/model_dir --op denoise"
 """
 
 import argparse
@@ -101,6 +101,11 @@ def _resolve_model_dir(args: argparse.Namespace) -> str:
     return resolved_dir
 
 
+def _resolve_op(args: argparse.Namespace) -> str:
+    op = args.op or os.environ.get("CRYOFM_OP") or "denoise"
+    return op
+
+
 def _build_wrapper_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     parser.add_argument("--work-dir", required=True)
@@ -110,12 +115,14 @@ def _build_wrapper_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-revision")
     parser.add_argument("--hf-cache-dir")
     parser.add_argument("--local-files-only", action="store_true")
+    parser.add_argument("--op")
     return parser
 
 
 def parse_cryoseed_wrapper_args() -> dict:
     args, passthrough_args = _build_wrapper_parser().parse_known_args(sys.argv[1:])
     model_dir = _resolve_model_dir(args)
+    op = _resolve_op(args)
 
     work_dir = osp.abspath(args.work_dir)
     starfile = _resolve_starfile_path(work_dir, args.star_file)
@@ -125,6 +132,7 @@ def parse_cryoseed_wrapper_args() -> dict:
     return {
         "work_dir": work_dir,
         "model_dir": model_dir,
+        "op": op,
         "starfile": starfile,
         "passthrough_args": passthrough_args,
     }
@@ -151,7 +159,12 @@ def _ensure_parent_dir(path: str) -> None:
 
 
 def _get_generated_output_path(work_dir: str, input_map_path: str) -> str:
-    return osp.join(work_dir, f"{Path(input_map_path).stem}_external_reconstruct.mrc")
+    stem = Path(input_map_path).stem
+    if stem.endswith("_external_reconstruct"):
+        output_stem = stem
+    else:
+        output_stem = f"{stem}_external_reconstruct"
+    return osp.join(work_dir, f"{output_stem}.mrc")
 
 
 def _is_lock_available(lock_file: str) -> bool:
@@ -261,7 +274,7 @@ def _find_accelerate_command() -> str:
     return accelerate_cmd
 
 
-def _safe_link(source_path: str, target_path: str) -> None:
+def _replace_output(source_path: str, target_path: str) -> None:
     source_path = osp.abspath(source_path)
     target_path = osp.abspath(target_path)
     _ensure_parent_dir(target_path)
@@ -271,10 +284,10 @@ def _safe_link(source_path: str, target_path: str) -> None:
 
     if osp.lexists(target_path):
         if osp.isdir(target_path) and not osp.islink(target_path):
-            raise IsADirectoryError(f"Cannot replace directory with symlink: {target_path}")
+            raise IsADirectoryError(f"Cannot replace directory with file: {target_path}")
         os.remove(target_path)
 
-    os.symlink(source_path, target_path)
+    os.replace(source_path, target_path)
 
 
 def prepare_half_maps(
@@ -321,6 +334,7 @@ def prepare_half_maps(
 def launch_uncond_sampling(
     work_dir: str,
     model_dir: str,
+    op: str,
     half_map_1: str,
     half_map_2: str,
     passthrough_args: list[str],
@@ -346,7 +360,7 @@ def launch_uncond_sampling(
         "--model-dir",
         model_dir,
         "--op",
-        "denoise",
+        op,
         "--norm-grad",
         "--use-lamb-w",
         *script_args,
@@ -384,8 +398,8 @@ def publish_results(
     if not osp.isfile(generated_half1):
         raise FileNotFoundError(f"Expected generated file not found: {generated_half1}")
 
-    _safe_link(generated_half0, result_path0)
-    _safe_link(generated_half1, result_path1)
+    _replace_output(generated_half0, result_path0)
+    _replace_output(generated_half1, result_path1)
 
 
 def main():
@@ -472,6 +486,7 @@ def main():
         launch_uncond_sampling(
             work_dir=args["work_dir"],
             model_dir=args["model_dir"],
+            op=args["op"],
             half_map_1=prepared["half_map_1"],
             half_map_2=prepared["half_map_2"],
             passthrough_args=args["passthrough_args"],

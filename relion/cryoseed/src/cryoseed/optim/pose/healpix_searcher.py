@@ -86,15 +86,15 @@ class HEALPixPoseSearcher(torch.nn.Module):
             noise=noise,
             device=device,
             device_mesh=device_mesh,
-            t_extent=config.pose_search.t_extent,
-            t_ngrid=config.pose_search.t_ngrid,
-            t_xshift=config.pose_search.t_xshift,
-            t_yshift=config.pose_search.t_yshift,
+            trans_grid_samples=config.pose_search.trans_grid_samples,
+            trans_grid_x_shift=config.pose_search.trans_grid_x_shift,
+            trans_grid_y_shift=config.pose_search.trans_grid_y_shift,
             pose_chunk_factor=config.pose_search.pose_chunk_factor,
             max_candidates=config.pose_search.max_candidates,
             mse_chunk=config.pose_search.mse_chunk,
             candidate_select_threshold=config.pose_search.candidate_select_threshold,
             renormalize_sel_prob=config.pose_search.renormalize_sel_prob,
+            oversampling_deduplicate=config.pose_search.oversampling_deduplicate,
             ssd_cache_root=config.io.ssd_cache_root,
         )
 
@@ -107,15 +107,15 @@ class HEALPixPoseSearcher(torch.nn.Module):
         noise: NoiseVariance | None = None,
         device: torch.device | str | None = None,
         device_mesh: Any | None = None,
-        t_extent: int = 35,
-        t_ngrid: int = 7,
-        t_xshift: int = 0,
-        t_yshift: int = 0,
+        trans_grid_samples: int = 5,
+        trans_grid_x_shift: int = 0,
+        trans_grid_y_shift: int = 0,
         pose_chunk_factor: int = 2560,
         max_candidates: int = 100,
         mse_chunk: int = 8192,
-        candidate_select_threshold: float = 0.9999,
+        candidate_select_threshold: float = 0.999,
         renormalize_sel_prob: bool = True,
+        oversampling_deduplicate: bool = False,
         ssd_cache_root: str | None = None,
     ):
         super().__init__()
@@ -129,23 +129,23 @@ class HEALPixPoseSearcher(torch.nn.Module):
         self.device_mesh = device_mesh
 
         # fixed parameters
-        self.t_extent = t_extent
-        self.t_ngrid = t_ngrid
-        self.t_xshift = t_xshift
-        self.t_yshift = t_yshift
+        self.trans_grid_samples = trans_grid_samples
+        self.trans_grid_x_shift = trans_grid_x_shift
+        self.trans_grid_y_shift = trans_grid_y_shift
         self.pose_chunk_factor = pose_chunk_factor
-        self.max_candidates = max_candidates
         self.mse_chunk = mse_chunk
         self.candidate_select_threshold = candidate_select_threshold
         self.renormalize_sel_prob = renormalize_sel_prob
+        self.oversampling_deduplicate = bool(oversampling_deduplicate)
         self.ssd_cache_root = ssd_cache_root
 
         if self.pose_chunk_factor is not None and self.pose_chunk_factor <= 0:
             raise ValueError("pose_chunk_factor must be positive or None")
         if self.mse_chunk <= 0:
             raise ValueError("mse_chunk must be > 0")
-        if self.max_candidates <= 0:
-            raise ValueError("max_candidates must be > 0")
+        if max_candidates == 0 or max_candidates < -1:
+            raise ValueError("max_candidates must be > 0, or -1 for unlimited")
+        self.max_candidates = None if max_candidates == -1 else int(max_candidates)
         if not (0 < self.candidate_select_threshold <= 1):
             raise ValueError("candidate_select_threshold must be in (0, 1]")
 
@@ -195,12 +195,15 @@ class HEALPixPoseSearcher(torch.nn.Module):
         self.side_length = schedule.side_length
         self.base_healpix_order = schedule.healpix_order
         self.current_healpix_order = schedule.healpix_order
+        self.base_trans_healpix_order = 0
+        self.current_trans_healpix_order = 0
         self.num_oversampling = schedule.oversampling
+        self.trans_grid_extent = float(schedule.trans_grid_extent)
 
         if int(self.base_healpix_order) < 1:
-            raise ValueError(
-                "healpix_order must be >= 1 because translation grid uses order-1"
-            )
+            raise ValueError("healpix_order must be >= 1")
+        if self.trans_grid_extent < 0:
+            raise ValueError("trans_grid_extent must be >= 0")
 
     def _refresh_pose_grid(self) -> None:
         healpix_order = self.base_healpix_order
@@ -214,16 +217,16 @@ class HEALPixPoseSearcher(torch.nn.Module):
         self._set_buffer("base_rot", base_rot, persistent=False)
         self.num_base_rot = len(base_rot)
 
-        trans_healpix_order = healpix_order - 1
+        trans_healpix_order = self.base_trans_healpix_order
         # Translations are defined in pixel units on the input Fourier grid (D) and are
         # independent of the current frequency window (side_length L).
         base_trans = numpy_to_tensor(
             shift_grid.base_shift_grid(
                 trans_healpix_order,
-                self.t_extent,
-                self.t_ngrid,
-                xshift=self.t_xshift,
-                yshift=self.t_yshift,
+                self.trans_grid_extent,
+                self.trans_grid_samples,
+                xshift=self.trans_grid_x_shift,
+                yshift=self.trans_grid_y_shift,
             ),
             device=self.device,
             dtype=torch.float32,
@@ -247,6 +250,52 @@ class HEALPixPoseSearcher(torch.nn.Module):
             denom = torch.zeros_like(counts)
             denom[counts > 0] = 1.0 / counts[counts > 0]
             self._set_buffer("ring_denom", denom, persistent=False)
+
+    def _radial_residual_power(
+        self,
+        proj_image: torch.Tensor,
+        trans_image: torch.Tensor,
+        *,
+        sel2proj_idx: torch.LongTensor,
+        sel2trans_idx: torch.LongTensor,
+    ) -> torch.Tensor:
+        """Compute radial residual power for selected hypotheses.
+
+        Args:
+            proj_image: Projection buffer of shape ``(U_proj, P)`` or ``(B*K*Q, P)``.
+            trans_image: Translated-image buffer of shape ``(U_trans, P)`` or ``(B*T, P)``.
+            sel2proj_idx: Row indices mapping each selected hypothesis to ``proj_image``.
+            sel2trans_idx: Row indices mapping each selected hypothesis to ``trans_image``.
+
+        Returns:
+            Tensor of shape ``(N_sel, R)`` containing the per-ring mean squared residual
+            for each selected hypothesis.
+        """
+        sel2proj_idx = sel2proj_idx.to(device=proj_image.device, dtype=torch.long)
+        sel2trans_idx = sel2trans_idx.to(device=trans_image.device, dtype=torch.long)
+        ring_idx = self.valid_pixel2ring_idx
+        ring_denom = self.ring_denom
+        if ring_idx.device != proj_image.device:
+            ring_idx = ring_idx.to(proj_image.device)
+        if ring_denom.device != proj_image.device:
+            ring_denom = ring_denom.to(proj_image.device)
+
+        N = int(sel2proj_idx.numel())
+        radial_residual_power = torch.zeros((N, int(self.R)), device=proj_image.device, dtype=torch.float32)
+        residual_chunk = max(1, int(self.mse_chunk))
+        for chunk_start in range(0, N, residual_chunk):
+            chunk_end = min(chunk_start + residual_chunk, N)
+            proj_sel = proj_image.index_select(0, sel2proj_idx[chunk_start:chunk_end])
+            trans_sel = trans_image.index_select(0, sel2trans_idx[chunk_start:chunk_end])
+            residual_power = (proj_sel - trans_sel).abs().square().to(torch.float32)
+            radial_residual_power[chunk_start:chunk_end].scatter_add_(
+                1,
+                ring_idx.view(1, -1).expand(chunk_end - chunk_start, -1),
+                residual_power,
+            )
+            radial_residual_power[chunk_start:chunk_end] *= ring_denom.view(1, -1)
+
+        return radial_residual_power
 
     
     def _refresh_caches(self) -> None:
@@ -354,55 +403,12 @@ class HEALPixPoseSearcher(torch.nn.Module):
             rotmat: Rotation matrices for ``quat`` with shape ``(8 * N, 3, 3)``.
         """
         current_healpix_order = int(self.current_healpix_order)
-        N_sel = quat.shape[0]
-
-        if isinstance(quat, torch.Tensor):
-            quat_np = quat.detach().cpu().numpy()
-        else:
-            quat_np = np.asarray(quat)
-
-        if isinstance(rot_grid_idx, torch.Tensor):
-            rot_grid_idx_np = rot_grid_idx.detach().cpu().numpy()
-        else:
-            rot_grid_idx_np = np.asarray(rot_grid_idx)
-
-        if rot_grid_idx_np.ndim == 3 and rot_grid_idx_np.shape[0] == 1:
-            rot_grid_idx_np = np.squeeze(rot_grid_idx_np, axis=0)
-
-        if quat_np.ndim != 2 or quat_np.shape != (N_sel, 4):
-            raise ValueError(
-                f"quat must have shape ({N_sel}, 4), got {quat_np.shape}"
-            )
-        if rot_grid_idx_np.ndim != 2 or rot_grid_idx_np.shape != (N_sel, 2):
-            raise ValueError(
-                f"rot_grid_idx must have shape ({N_sel}, 2), got {rot_grid_idx_np.shape}"
-            )
-
-        s2_max = 12 * (4**current_healpix_order)
-        s1_max = 6 * (2**current_healpix_order)
-        if not np.all((rot_grid_idx_np[:, 0] >= 0) & (rot_grid_idx_np[:, 0] < s2_max)):
-            raise ValueError("s2i out of range")
-        if not np.all((rot_grid_idx_np[:, 1] >= 0) & (rot_grid_idx_np[:, 1] < s1_max)):
-            raise ValueError("s1i out of range")
-
-        neighbors = [
-            so3_grid.get_neighbor(
-                quat_np[i],
-                int(rot_grid_idx_np[i, 0]),
-                int(rot_grid_idx_np[i, 1]),
-                current_healpix_order,
-            )
-            for i in range(N_sel)
-        ]
-
-        quat_np = np.array([x[0] for x in neighbors]).reshape(-1, 4)
-        rot_grid_idx_np = np.array([x[1] for x in neighbors]).reshape(-1, 2)
-
-        quat = torch.from_numpy(quat_np).to(self.device)
-        rot_grid_idx = torch.from_numpy(rot_grid_idx_np).to(self.device, dtype=torch.long)
-        rotmat = quaternion_to_matrix(quat)
-
-        return quat, rot_grid_idx, rotmat
+        return so3_grid.subdivide_neighbors(
+            quat,
+            rot_grid_idx,
+            current_healpix_order,
+            device=self.device,
+        )
 
     def _subdivide_trans_candidates(
         self,
@@ -410,48 +416,37 @@ class HEALPixPoseSearcher(torch.nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Subdivide translation candidates to the next translation-grid resolution.
 
-        The translation grid is defined at HEALPix order ``self.current_healpix_order - 1``.
+        The translation grid is defined at ``self.current_trans_healpix_order``.
         Given translation-grid indices ``(ix, iy)`` at that resolution, this returns the 4
         nearest neighbors at the next resolution level (one level finer).
 
         Args:
             trans_grid_idx: Translation grid indices with shape ``(N, 2)`` at order
-                ``self.current_healpix_order - 1``.
+                ``self.current_trans_healpix_order``.
 
         Returns:
-            trans: Neighbor translations with shape ``(4 * N, 2)``.
+            trans: Neighbor translation-grid coordinates with shape ``(4 * N, 2)``.
+                These are grid-defined translations before adding any per-image
+                ``pose.translation(...)`` center.
             trans_grid_idx: Neighbor indices with shape ``(4 * N, 2)``.
         """
-        current_healpix_order = int(self.current_healpix_order)
-        trans_healpix_order = current_healpix_order - 1
+        trans_healpix_order = int(self.current_trans_healpix_order)
 
-        N_sel = int(trans_grid_idx.shape[0])
-
-        if isinstance(trans_grid_idx, torch.Tensor):
-            trans_grid_idx_np = trans_grid_idx.detach().cpu().numpy()
-        else:
-            trans_grid_idx_np = np.asarray(trans_grid_idx)
-
-        neighbors = [
-            shift_grid.get_neighbor(
-                trans_grid_idx_np[i, 0],
-                trans_grid_idx_np[i, 1],
-                trans_healpix_order,
-                self.t_extent,
-                self.t_ngrid,
-            )
-            for i in range(N_sel)
-        ]
-
-        trans = torch.from_numpy(np.array([neighbor[0] for neighbor in neighbors])).to(
-            self.device
+        trans_grid_idx = torch.as_tensor(
+            trans_grid_idx, device=self.device, dtype=torch.long
         )
-        trans_grid_idx = torch.from_numpy(
-            np.array([neighbor[1] for neighbor in neighbors])
-        ).to(self.device, dtype=torch.long)
+        trans, trans_grid_idx = shift_grid.get_neighbor(
+            trans_grid_idx[:, 0],
+            trans_grid_idx[:, 1],
+            trans_healpix_order,
+            self.trans_grid_extent,
+            self.trans_grid_samples,
+        )
 
-        trans = trans.reshape(-1, 2)
-        trans_grid_idx = trans_grid_idx.reshape(-1, 2)
+        trans = trans.reshape(-1, 2).to(self.device, dtype=torch.float32)
+        trans_grid_idx = trans_grid_idx.reshape(-1, 2).to(
+            self.device, dtype=torch.long
+        )
 
         return trans, trans_grid_idx
 
@@ -577,15 +572,19 @@ class HEALPixPoseSearcher(torch.nn.Module):
             image: Fourier-domain images of shape ``(B, D, D)`` (complex). Translations are
                 applied on this full-resolution FFT grid and the result is then center-cropped
                 to ``(B, L, L)`` using ``side_length``.
-            translation: Translation vectors of shape ``(T, 2)`` in pixels on the input grid
-                ``D`` (not scaled by ``side_length``), where each row is ``(dx, dy)``.
+            translation: Translation vectors of shape ``(B, T, 2)`` in pixels on the input
+                grid ``D`` (not scaled by ``side_length``), where each row is ``(dx, dy)``.
 
         Returns:
             Complex tensor of translated images with shape ``(B, T, P)``, where ``P`` is the
             number of valid Fourier pixels selected by ``valid_pixel_mask``.
         """
         B = int(image.shape[0])
-        T = int(translation.shape[0])
+        if translation.ndim != 3 or int(translation.shape[0]) != B or int(translation.shape[-1]) != 2:
+            raise ValueError(
+                f"translation must have shape (B, T, 2) with B={B}, got {tuple(translation.shape)}"
+            )
+        T = int(translation.shape[1])
         D = int(image.shape[-1])
         L = int(self.side_length)
 
@@ -599,11 +598,10 @@ class HEALPixPoseSearcher(torch.nn.Module):
             trans_image = torch.empty(B, T, D, D, dtype=image.dtype, device=image.device)
             for chunk_start in range(0, T, trans_chunk):
                 chunk_end = min(chunk_start + trans_chunk, T)
-                trans = translation[chunk_start:chunk_end].view(1, -1, 2).expand(B, -1, -1)
+                trans = translation[:, chunk_start:chunk_end]
                 trans_image[:, chunk_start:chunk_end] = translate_image(image, trans)
         else:
-            trans = translation.view(1, T, 2).expand(B, -1, -1)
-            trans_image = translate_image(image, trans)  # (B, T, D, D)
+            trans_image = translate_image(image, translation)  # (B, T, D, D)
 
         trans_image = downsample2d(trans_image, L)  # (B, T, L, L)
 
@@ -866,7 +864,7 @@ class HEALPixPoseSearcher(torch.nn.Module):
         trans2img_idx = trans2img_idx.to(device=device)
         trans = trans.to(device=device)
 
-        n_pix_1d = int(self.t_ngrid * (2 ** (self.current_healpix_order - 1)))
+        n_pix_1d = int(self.trans_grid_samples * (2 ** self.current_trans_healpix_order))
         trans_id = trans_grid_idx[:, 0] * n_pix_1d + trans_grid_idx[:, 1]  # (T,)
 
         req_id = torch.stack([trans2img_idx, trans_id], dim=1)  # (T, 2)
@@ -924,7 +922,7 @@ class HEALPixPoseSearcher(torch.nn.Module):
 
         During oversampling, each rotation candidate is already tied to a specific volume
         via ``sel2vol_idx``. This function constructs the implicit combinations and
-        de-duplicates them using the hypothesis key
+        optionally de-duplicates them using the hypothesis key
         ``(img_idx, vol_idx, rot_id, trans_id)``.
         """
         N_sel = sel2img_idx.numel()
@@ -961,17 +959,23 @@ class HEALPixPoseSearcher(torch.nn.Module):
         hypo2proj_req_idx = unique_proj_req_inverse[hypo2rot_idx]
         hypo2trans_req_idx = unique_trans_req_inverse[hypo2trans_idx]
 
-        hypo_id = torch.stack(
-            [hypo2img_idx, hypo2vol_idx, rot_id_per_hypo, trans_id_per_hypo], dim=1
-        )
-        _, _, unique_hypo_first_idx = self._unique_with_first_index(
-            hypo_id, dim=0
-        )
+        if self.oversampling_deduplicate:
+            hypo_id = torch.stack(
+                [hypo2img_idx, hypo2vol_idx, rot_id_per_hypo, trans_id_per_hypo], dim=1
+            )
+            _, _, unique_hypo_first_idx = self._unique_with_first_index(
+                hypo_id, dim=0
+            )
 
-        uniq_hypo2img_idx = hypo2img_idx[unique_hypo_first_idx]
-        uniq_hypo2vol_idx = hypo2vol_idx[unique_hypo_first_idx]
-        uniq_hypo2proj_req_idx = hypo2proj_req_idx[unique_hypo_first_idx]
-        uniq_hypo2trans_req_idx = hypo2trans_req_idx[unique_hypo_first_idx]
+            uniq_hypo2img_idx = hypo2img_idx[unique_hypo_first_idx]
+            uniq_hypo2vol_idx = hypo2vol_idx[unique_hypo_first_idx]
+            uniq_hypo2proj_req_idx = hypo2proj_req_idx[unique_hypo_first_idx]
+            uniq_hypo2trans_req_idx = hypo2trans_req_idx[unique_hypo_first_idx]
+        else:
+            uniq_hypo2img_idx = hypo2img_idx
+            uniq_hypo2vol_idx = hypo2vol_idx
+            uniq_hypo2proj_req_idx = hypo2proj_req_idx
+            uniq_hypo2trans_req_idx = hypo2trans_req_idx
 
         order = torch.argsort(uniq_hypo2img_idx)
         uniq_hypo2img_idx = uniq_hypo2img_idx[order]
@@ -1239,7 +1243,7 @@ class HEALPixPoseSearcher(torch.nn.Module):
             sel_payload: Dict with the same keys as ``payload``, each tensor of shape (N_sel,).
         """
         threshold = self.candidate_select_threshold
-        max_candidates = int(self.max_candidates)
+        max_candidates = self.max_candidates
 
         if hypo_prob.numel() == 0:
             raise ValueError("hypo_prob must be non-empty")
@@ -1272,7 +1276,9 @@ class HEALPixPoseSearcher(torch.nn.Module):
             prob_cumsum = torch.cumsum(prob_sorted, dim=0)
 
             keep_count = int((prob_cumsum < threshold).sum().item()) + 1
-            keep_count = min(keep_count, img_cnt, max_candidates)
+            keep_count = min(keep_count, img_cnt)
+            if max_candidates is not None:
+                keep_count = min(keep_count, max_candidates)
 
             sel_idx = start + prob_idx_sorted[:keep_count]
 
@@ -1384,7 +1390,8 @@ class HEALPixPoseSearcher(torch.nn.Module):
                 The batch dimension must match ``image.shape[0]`` (no broadcasting).
 
         Returns:
-            A 5-tuple ``(sel_prob, sel2img_idx, sel2vol_idx, sel_rotmat, sel_trans)``, where:
+            A 6-tuple ``(sel_prob, sel2img_idx, sel2vol_idx, sel_rotmat, sel_trans,
+            sel_radial_residual_power)``, where:
 
             - sel_prob (torch.Tensor): Selected hypothesis probabilities with shape ``(N_sel,)``.
               Candidates are grouped by image index (``sel2img_idx``).
@@ -1396,6 +1403,9 @@ class HEALPixPoseSearcher(torch.nn.Module):
               ``(N_sel, 3, 3)``.
             - sel_trans (torch.Tensor): 2D translations (in pixels) for each selected hypothesis with shape
               ``(N_sel, 2)``.
+            - sel_radial_residual_power (torch.Tensor | None): Optional per-hypothesis radial
+              residual power with shape ``(N_sel, side_length // 2 + 1)``. Returned only when
+              noise estimation is enabled.
 
               Unit convention: translations are expressed in pixels of the *input* Fourier grid
               (``D = image.shape[-1]``) and are not scaled by the current ``side_length``.
@@ -1407,6 +1417,7 @@ class HEALPixPoseSearcher(torch.nn.Module):
 
         B = int(image.shape[0])
         K = int(self.volume.num_volumes)
+        pose_trans = self.pose.translation(particle_index).to(device=device, dtype=self.base_trans.dtype)
         # NOTE:
         # - All translations produced/consumed by this searcher are in pixel units of the input FFT grid
         #   (D = image.shape[-1]) and are never rescaled when side_length changes.
@@ -1434,6 +1445,12 @@ class HEALPixPoseSearcher(torch.nn.Module):
             ctf = ctf.to(device)
 
         self.current_healpix_order = self.base_healpix_order
+        self.current_trans_healpix_order = self.base_trans_healpix_order
+        sel_radial_residual_power = None
+        proj_flat = None
+        trans_flat = None
+        sel2proj_flat_idx = None
+        sel2trans_flat_idx = None
 
         current_volume_version = getattr(self.volume, "volume_version", None)
         if current_volume_version is None:
@@ -1453,8 +1470,10 @@ class HEALPixPoseSearcher(torch.nn.Module):
             #   volume x SO(3) rotation x 2D translation.
             #
             # Projections are computed for all volumes and base rotations (optionally cached).
-            # Translations are applied per image. Probabilities are normalized per image and
-            # then truncated by cumulative probability to keep a manageable candidate set.
+            # For each image, translation candidates are centered at its current pose
+            # translation and offset by the shared base translation grid. Probabilities are
+            # normalized per image and then truncated by cumulative probability to keep a
+            # manageable candidate set.
             Q = self.num_base_rot
             T = self.num_base_trans
 
@@ -1462,7 +1481,8 @@ class HEALPixPoseSearcher(torch.nn.Module):
             if int(proj_image.shape[0]) == 1:
                 proj_image = proj_image.expand(B, *proj_image.shape[1:])  # shape: (B, K*Q, P)
 
-            trans_image = self._translate_global(image, self.base_trans)  # shape: (B, T, P)
+            trans = pose_trans.view(B, 1, 2) + self.base_trans.view(1, T, 2)  # shape: (B, T, 2)
+            trans_image = self._translate_global(image, trans)  # shape: (B, T, P)
 
             hypo_prob = self._evaluate_broadcast(proj_image, trans_image)  # shape: (B*K*Q*T,)
             hypo_dev = hypo_prob.device
@@ -1504,23 +1524,22 @@ class HEALPixPoseSearcher(torch.nn.Module):
             sel2rot_idx = sel_payload["rot"]
             sel2trans_idx = sel_payload["trans"]
 
-            sel2rot_idx_np = sel2rot_idx.detach().cpu().numpy()
-            sel2trans_idx_np = sel2trans_idx.detach().cpu().numpy()
+            if self.noise is not None:
+                proj_flat = proj_image.reshape(B * (K * Q), -1)
+                trans_flat = trans_image.reshape(B * T, -1)
+                sel2proj_flat_idx = sel2img_idx * (K * Q) + sel2vol_idx * Q + sel2rot_idx
+                sel2trans_flat_idx = sel2img_idx * T + sel2trans_idx
 
             sel_quat = self.base_quat[sel2rot_idx]  # (N_sel, 4)
-            sel2rot_grid_idx_np = so3_grid.get_base_ind(
-                sel2rot_idx_np, self.base_healpix_order
-            )  # (N_sel, 2)
-            sel2rot_grid_idx = torch.from_numpy(sel2rot_grid_idx_np).to(self.device).long()
+            sel2rot_grid_idx = so3_grid.get_base_ind(
+                sel2rot_idx, self.base_healpix_order
+            ).to(self.device, dtype=torch.long)  # (N_sel, 2)
 
-            sel_trans = self.base_trans[sel2trans_idx]  # (N_sel, 2)
-            sel2trans_grid_idx_np = shift_grid.get_base_ind(
-                sel2trans_idx_np,
-                self.t_ngrid * 2 ** (self.base_healpix_order - 1),
-            )  # (N_sel, 2)
-            sel2trans_grid_idx = (
-                torch.from_numpy(sel2trans_grid_idx_np).to(self.device).long()
-            )  # (N_sel, 2)
+            sel_trans = trans[sel2img_idx, sel2trans_idx]  # (N_sel, 2)
+            sel2trans_grid_idx = shift_grid.get_base_ind(
+                sel2trans_idx,
+                self.trans_grid_samples * 2 ** self.base_trans_healpix_order,
+            ).to(self.device, dtype=torch.long)  # (N_sel, 2)
 
             if sel_quat.ndim == 1:
                 sel_quat = sel_quat[None, :]
@@ -1545,11 +1564,10 @@ class HEALPixPoseSearcher(torch.nn.Module):
         # Oversampling progressively increases the HEALPix order and refines the selected
         # candidates. At each round, we subdivide the current candidates to the next grid:
         # - rotations: order o -> o + 1 (8 neighbors)
-        # - translations: order (o - 1) -> o (4 neighbors)
+        # - translations: order t -> t + 1 (4 neighbors)
         #
-        # After subdivision, we advance ``self.current_healpix_order`` so that:
-        # - rotation ids are interpreted at the new order
-        # - translation ids remain interpreted at (current_healpix_order - 1)
+        # After subdivision, we advance the current rotation / translation orders so that
+        # ids are interpreted at the refined grids.
         for oversampling_round in range(self.num_oversampling):
             quat, rot_grid_idx, rotmat = self._subdivide_rot_candidates(
                 sel_quat, sel2rot_grid_idx
@@ -1557,15 +1575,18 @@ class HEALPixPoseSearcher(torch.nn.Module):
             rot2img_idx = sel2img_idx.repeat_interleave(8)
             rot2vol_idx = sel2vol_idx.repeat_interleave(8)
 
-            trans, trans_grid_idx = self._subdivide_trans_candidates(
+            grid_trans, trans_grid_idx = self._subdivide_trans_candidates(
                 sel2trans_grid_idx
             )
             trans2img_idx = sel2img_idx.repeat_interleave(4)
+            # ``grid_trans`` lives on the refined shared translation grid; add the
+            # corresponding per-image pose center to obtain absolute translations.
+            trans = pose_trans.index_select(0, trans2img_idx) + grid_trans
 
-            # After subdivision, rot_grid_idx is already at order (old_order + 1),
-            # and trans_grid_idx is already at translation order old_order.
-            # Therefore we must advance current_healpix_order before computing ids.
+            # After subdivision, rot_grid_idx / trans_grid_idx are already at the next
+            # rotation / translation orders. Advance both order trackers before computing ids.
             self.current_healpix_order = int(self.base_healpix_order) + oversampling_round + 1
+            self.current_trans_healpix_order = int(self.base_trans_healpix_order) + oversampling_round + 1
 
             # Projection / translation with request de-duplication.
             (
@@ -1637,6 +1658,12 @@ class HEALPixPoseSearcher(torch.nn.Module):
             sel2proj_req_idx = sel_payload["proj_req"]
             sel2trans_req_idx = sel_payload["trans_req"]
 
+            if self.noise is not None:
+                proj_flat = proj_image
+                trans_flat = trans_image
+                sel2proj_flat_idx = sel2proj_req_idx
+                sel2trans_flat_idx = sel2trans_req_idx
+
             sel_quat, sel2rot_grid_idx, sel_trans, sel2trans_grid_idx = (
                 self._gather_selected_candidates(
                     quat=quat,
@@ -1666,6 +1693,7 @@ class HEALPixPoseSearcher(torch.nn.Module):
             )
 
         self.current_healpix_order = self.base_healpix_order
+        self.current_trans_healpix_order = self.base_trans_healpix_order
 
         self.pose.accumulate(
             particle_index,
@@ -1674,6 +1702,14 @@ class HEALPixPoseSearcher(torch.nn.Module):
         )
         sel_rotmat = quaternion_to_matrix(sel_quat).to(self.device)
 
+        if self.noise is not None and proj_flat is not None:
+            sel_radial_residual_power = self._radial_residual_power(
+                proj_flat,
+                trans_flat,
+                sel2proj_idx=sel2proj_flat_idx,
+                sel2trans_idx=sel2trans_flat_idx,
+            )
+
         self.volume_version = getattr(self.volume, "volume_version", self.volume_version)
 
-        return sel_prob, sel2img_idx, sel2vol_idx, sel_rotmat, sel_trans
+        return sel_prob, sel2img_idx, sel2vol_idx, sel_rotmat, sel_trans, sel_radial_residual_power

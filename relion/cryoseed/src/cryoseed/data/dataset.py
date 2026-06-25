@@ -34,6 +34,39 @@ from cryoseed.ops.transforms import downsample2d
 __all__ = ["ParticleDataset"]
 
 
+OPTIC_PARAM_KEY_ALIASES: dict[str, str] = {
+    "kV": "voltage_kv",
+    "Cs": "spherical_aberration_mm",
+    "Bfac": "bfactor",
+    "scale": "ctf_scale",
+    "Q0": "amplitude_contrast",
+    "phase_shift": "phase_shift_deg",
+}
+
+PARTICLE_PARAM_KEY_ALIASES: dict[str, str] = {
+    "DeltafU": "defocus_u_angstrom",
+    "DeltafV": "defocus_v_angstrom",
+    "azimuthal_angle": "defocus_angle_deg",
+}
+
+
+def _normalize_param_keys(
+    params: dict | None,
+    aliases: dict[str, str],
+    preferred_keys: list[str],
+) -> dict[str, object]:
+    normalized = dict(params or {})
+    for old_key, new_key in aliases.items():
+        if old_key in normalized and new_key not in normalized:
+            normalized[new_key] = normalized[old_key]
+        normalized.pop(old_key, None)
+
+    out: dict[str, object] = {}
+    for key in preferred_keys:
+        out[key] = normalized.get(key)
+    return out
+
+
 class ParticleDataset(Dataset):
     """Cryo-EM particle dataset backed by RELION STAR metadata.
 
@@ -164,21 +197,40 @@ class ParticleDataset(Dataset):
 
         self.num_particles = len(self.samples)
 
-        self.default_optic_params = dict(default_optic_params or {})
-        self.default_particle_params = dict(default_particle_params or {})
+        self.default_optic_params = _normalize_param_keys(
+            default_optic_params,
+            OPTIC_PARAM_KEY_ALIASES,
+            [
+                "voltage_kv",
+                "spherical_aberration_mm",
+                "bfactor",
+                "ctf_scale",
+                "amplitude_contrast",
+                "phase_shift_deg",
+            ],
+        )
+        self.default_particle_params = _normalize_param_keys(
+            default_particle_params,
+            PARTICLE_PARAM_KEY_ALIASES,
+            [
+                "defocus_u_angstrom",
+                "defocus_v_angstrom",
+                "defocus_angle_deg",
+            ],
+        )
 
         self._optic_fallback_params = {
-            "kV": None,
-            "Cs": None,
-            "Bfac": 0.0,
-            "scale": 1.0,
-            "Q0": 0.1,
-            "phase_shift": 0.0,
+            "voltage_kv": None,
+            "spherical_aberration_mm": None,
+            "bfactor": 0.0,
+            "ctf_scale": 1.0,
+            "amplitude_contrast": 0.1,
+            "phase_shift_deg": 0.0,
         }
         self._particle_fallback_params = {
-            "DeltafU": None,
-            "DeltafV": None,
-            "azimuthal_angle": 90.0,
+            "defocus_u_angstrom": None,
+            "defocus_v_angstrom": None,
+            "defocus_angle_deg": 90.0,
         }
 
         self._load_ctf_params()
@@ -339,78 +391,78 @@ class ParticleDataset(Dataset):
         CTF parameter, using STAR columns when available and falling back to
         user-provided defaults when necessary.
         """
-        self.kV = self._get_param(
+        self.voltage_kv = self._get_param(
             "rlnVoltage",
             self.df_particles,
-            self.default_optic_params.get("kV"),
-            self._optic_fallback_params["kV"],
-            override_name="default_optic_params['kV']",
-            cli_arg="--kV",
+            self.default_optic_params.get("voltage_kv"),
+            self._optic_fallback_params["voltage_kv"],
+            override_name="default_optic_params['voltage_kv']",
+            cli_arg="--voltage-kv",
         )
-        self.Cs = self._get_param(
+        self.spherical_aberration_mm = self._get_param(
             "rlnSphericalAberration",
             self.df_particles,
-            self.default_optic_params.get("Cs"),
-            self._optic_fallback_params["Cs"],
-            override_name="default_optic_params['Cs']",
-            cli_arg="--Cs",
+            self.default_optic_params.get("spherical_aberration_mm"),
+            self._optic_fallback_params["spherical_aberration_mm"],
+            override_name="default_optic_params['spherical_aberration_mm']",
+            cli_arg="--spherical-aberration-mm",
         )
-        self.Bfac = self._get_param(
+        self.bfactor = self._get_param(
             "rlnCtfBfactor",
             self.df_particles,
-            self.default_optic_params.get("Bfac"),
-            self._optic_fallback_params["Bfac"],
-            override_name="default_optic_params['Bfac']",
-            cli_arg="--Bfac",
+            self.default_optic_params.get("bfactor"),
+            self._optic_fallback_params["bfactor"],
+            override_name="default_optic_params['bfactor']",
+            cli_arg="--bfactor",
         )
-        self.scale = self._get_param(
+        self.ctf_scale = self._get_param(
             "rlnCtfScalefactor",
             self.df_particles,
-            self.default_optic_params.get("scale"),
-            self._optic_fallback_params["scale"],
-            override_name="default_optic_params['scale']",
-            cli_arg="--scale",
+            self.default_optic_params.get("ctf_scale"),
+            self._optic_fallback_params["ctf_scale"],
+            override_name="default_optic_params['ctf_scale']",
+            cli_arg="--ctf-scale",
         )
-        self.Q0 = self._get_param(
+        self.amplitude_contrast = self._get_param(
             "rlnAmplitudeContrast",
             self.df_particles,
-            self.default_optic_params.get("Q0"),
-            self._optic_fallback_params["Q0"],
-            override_name="default_optic_params['Q0']",
-            cli_arg="--Q0",
+            self.default_optic_params.get("amplitude_contrast"),
+            self._optic_fallback_params["amplitude_contrast"],
+            override_name="default_optic_params['amplitude_contrast']",
+            cli_arg="--amplitude-contrast",
         )
-        self.phase_shift = self._get_param(
+        self.phase_shift_deg = self._get_param(
             "rlnPhaseShift",
             self.df_particles,
-            self.default_optic_params.get("phase_shift"),
-            self._optic_fallback_params["phase_shift"],
-            override_name="default_optic_params['phase_shift']",
-            cli_arg="--phase-shift",
+            self.default_optic_params.get("phase_shift_deg"),
+            self._optic_fallback_params["phase_shift_deg"],
+            override_name="default_optic_params['phase_shift_deg']",
+            cli_arg="--phase-shift-deg",
         )
 
-        self.DeltafU = self._get_param(
+        self.defocus_u_angstrom = self._get_param(
             "rlnDefocusU",
             self.df_particles,
-            self.default_particle_params.get("DeltafU"),
-            self._particle_fallback_params["DeltafU"],
-            override_name="default_particle_params['DeltafU']",
-            cli_arg="--DeltafU",
+            self.default_particle_params.get("defocus_u_angstrom"),
+            self._particle_fallback_params["defocus_u_angstrom"],
+            override_name="default_particle_params['defocus_u_angstrom']",
+            cli_arg="--defocus-u-angstrom",
         )
-        self.DeltafV = self._get_param(
+        self.defocus_v_angstrom = self._get_param(
             "rlnDefocusV",
             self.df_particles,
-            self.default_particle_params.get("DeltafV"),
-            self.DeltafU,
-            override_name="default_particle_params['DeltafV']",
-            cli_arg="--DeltafV",
+            self.default_particle_params.get("defocus_v_angstrom"),
+            self.defocus_u_angstrom,
+            override_name="default_particle_params['defocus_v_angstrom']",
+            cli_arg="--defocus-v-angstrom",
         )
-        self.azimuthal_angle = self._get_param(
+        self.defocus_angle_deg = self._get_param(
             "rlnDefocusAngle",
             self.df_particles,
-            self.default_particle_params.get("azimuthal_angle"),
-            self._particle_fallback_params["azimuthal_angle"],
-            override_name="default_particle_params['azimuthal_angle']",
-            cli_arg="--defocus-angle",
+            self.default_particle_params.get("defocus_angle_deg"),
+            self._particle_fallback_params["defocus_angle_deg"],
+            override_name="default_particle_params['defocus_angle_deg']",
+            cli_arg="--defocus-angle-deg",
         )
 
     def _get_ctf_params_tensor(self, i: int) -> torch.Tensor:
@@ -421,19 +473,19 @@ class ParticleDataset(Dataset):
 
         Returns:
             torch.Tensor: A 1D tensor of shape ``(9,)`` with the convention:
-            ``[kV, Cs, Bfac, scale, Q0, phase_shift, DeltafU, DeltafV, azimuthal_angle]``.
+            ``[voltage_kv, spherical_aberration_mm, bfactor, ctf_scale, amplitude_contrast, phase_shift_deg, defocus_u_angstrom, defocus_v_angstrom, defocus_angle_deg]``.
         """
         return torch.stack(
             [
-                self.kV[i],
-                self.Cs[i],
-                self.Bfac[i],
-                self.scale[i],
-                self.Q0[i],
-                self.phase_shift[i],
-                self.DeltafU[i],
-                self.DeltafV[i],
-                self.azimuthal_angle[i],
+                self.voltage_kv[i],
+                self.spherical_aberration_mm[i],
+                self.bfactor[i],
+                self.ctf_scale[i],
+                self.amplitude_contrast[i],
+                self.phase_shift_deg[i],
+                self.defocus_u_angstrom[i],
+                self.defocus_v_angstrom[i],
+                self.defocus_angle_deg[i],
             ],
             dim=0,
         )  # (9,)
@@ -464,17 +516,19 @@ class ParticleDataset(Dataset):
             a scalar value. Parameters that vary across particles are omitted.
         """
         optic = {
-            "kV": self._maybe_constant_scalar(self.kV),
-            "Cs": self._maybe_constant_scalar(self.Cs),
-            "Bfac": self._maybe_constant_scalar(self.Bfac),
-            "scale": self._maybe_constant_scalar(self.scale),
-            "Q0": self._maybe_constant_scalar(self.Q0),
-            "phase_shift": self._maybe_constant_scalar(self.phase_shift),
+            "voltage_kv": self._maybe_constant_scalar(self.voltage_kv),
+            "spherical_aberration_mm": self._maybe_constant_scalar(
+                self.spherical_aberration_mm
+            ),
+            "bfactor": self._maybe_constant_scalar(self.bfactor),
+            "ctf_scale": self._maybe_constant_scalar(self.ctf_scale),
+            "amplitude_contrast": self._maybe_constant_scalar(self.amplitude_contrast),
+            "phase_shift_deg": self._maybe_constant_scalar(self.phase_shift_deg),
         }
         particle = {
-            "DeltafU": self._maybe_constant_scalar(self.DeltafU),
-            "DeltafV": self._maybe_constant_scalar(self.DeltafV),
-            "azimuthal_angle": self._maybe_constant_scalar(self.azimuthal_angle),
+            "defocus_u_angstrom": self._maybe_constant_scalar(self.defocus_u_angstrom),
+            "defocus_v_angstrom": self._maybe_constant_scalar(self.defocus_v_angstrom),
+            "defocus_angle_deg": self._maybe_constant_scalar(self.defocus_angle_deg),
         }
         optic_out = {k: v for k, v in optic.items() if v is not None}
         particle_out = {k: v for k, v in particle.items() if v is not None}

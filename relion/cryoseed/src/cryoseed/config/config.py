@@ -7,6 +7,39 @@ from pathlib import Path
 from typing import Any
 
 
+OPTIC_PARAM_KEY_ALIASES: dict[str, str] = {
+    "kV": "voltage_kv",
+    "Cs": "spherical_aberration_mm",
+    "Bfac": "bfactor",
+    "scale": "ctf_scale",
+    "Q0": "amplitude_contrast",
+    "phase_shift": "phase_shift_deg",
+}
+
+PARTICLE_PARAM_KEY_ALIASES: dict[str, str] = {
+    "DeltafU": "defocus_u_angstrom",
+    "DeltafV": "defocus_v_angstrom",
+    "azimuthal_angle": "defocus_angle_deg",
+}
+
+
+def _normalize_param_keys(
+    params: Any,
+    aliases: dict[str, str],
+    preferred_keys: list[str],
+) -> dict[str, Any]:
+    normalized = dict(params or {})
+    for old_key, new_key in aliases.items():
+        if old_key in normalized and new_key not in normalized:
+            normalized[new_key] = normalized[old_key]
+        normalized.pop(old_key, None)
+
+    out: dict[str, Any] = {}
+    for key in preferred_keys:
+        out[key] = normalized.get(key)
+    return out
+
+
 @dataclass
 class IOConfig:
     """Input / output paths."""
@@ -33,20 +66,20 @@ class DataConfig:
 
     default_optic_params: dict[str, Any] = field(
         default_factory=lambda: {
-            "kV": None,
-            "Cs": None,
-            "Bfac": None,
-            "scale": None,
-            "Q0": None,
-            "phase_shift": None,
+            "voltage_kv": None,
+            "spherical_aberration_mm": None,
+            "bfactor": None,
+            "ctf_scale": None,
+            "amplitude_contrast": None,
+            "phase_shift_deg": None,
         }
     )
 
     default_particle_params: dict[str, Any] = field(
         default_factory=lambda: {
-            "DeltafU": None,
-            "DeltafV": None,
-            "azimuthal_angle": None,
+            "defocus_u_angstrom": None,
+            "defocus_v_angstrom": None,
+            "defocus_angle_deg": None,
         }
     )
 
@@ -70,8 +103,8 @@ class ReconstructionConfig:
     requires_grad: bool = False
     requires_accum: bool = True
 
-    backproject_chunk: int = 65536
-    accumulate_chunk: int = 65536
+    backproject_chunk: int = 16384
+    accumulate_chunk: int = 16384
 
 
 @dataclass
@@ -91,7 +124,7 @@ class StatisticsConfig:
 class RefinementConfig:
     """Outer refinement loop configuration."""
 
-    num_epochs: int = 15
+    num_epochs: int = 50
     fsc_threshold: float = 0.143
     init_lowpass_angstrom: float = 30
 
@@ -101,13 +134,16 @@ class SchedulerConfig:
 
     # confidence-driven update
     confidence_threshold: float = 0.1
+    fsc_resolution_patience: int = 3
+    fsc_resolution_improvement_threshold: float = 0.0
+    fsc_resolution_rebound_threshold: float = 1e-2
 
     # side_length update policy
     increase_radius_step: int = 10
     increase_radius_aggressive_factor: float = 0.25
 
     # Starting HEALPix order used while the scheduler stays in global search
-    base_healpix_order: int = 2
+    base_healpix_order: int = 3
     # HEALPix order at which the scheduler switches from global to local search
     auto_local_healpix_order: int = 4
 
@@ -115,6 +151,7 @@ class SchedulerConfig:
     use_cache: bool = False
     cache_max_healpix_order: int = 4
     ssd_cache_min_side_length: int = 150
+    trans_extent_scale: float = 3.0
 
 @dataclass
 class PoseSearchConfig:
@@ -122,17 +159,18 @@ class PoseSearchConfig:
 
     init_healpix_order: int = 2
 
-    k_steps: int = 2
-    t_extent: int = 35
-    t_ngrid: int = 7
-    t_xshift: int = 0
-    t_yshift: int = 0
+    neighbor_steps: int = 2
+    init_trans_grid_extent: float = 5
+    trans_grid_samples: int = 5
+    trans_grid_x_shift: int = 0
+    trans_grid_y_shift: int = 0
 
     pose_chunk_factor: int | None = 2560
     max_candidates: int = 100
     mse_chunk: int = 8192
-    candidate_select_threshold: float = 0.9999
+    candidate_select_threshold: float = 0.999
     renormalize_sel_prob: bool = True
+    oversampling_deduplicate: bool = False
 
 
 @dataclass
@@ -268,7 +306,29 @@ class MainConfig:
             normalized["io"] = IOConfig()
 
         if isinstance(normalized.get("data"), dict):
-            normalized["data"] = DataConfig(**cls._filter_kwargs(DataConfig, normalized["data"]))
+            data_config = dict(normalized["data"])
+            data_config["default_optic_params"] = _normalize_param_keys(
+                data_config.get("default_optic_params"),
+                OPTIC_PARAM_KEY_ALIASES,
+                [
+                    "voltage_kv",
+                    "spherical_aberration_mm",
+                    "bfactor",
+                    "ctf_scale",
+                    "amplitude_contrast",
+                    "phase_shift_deg",
+                ],
+            )
+            data_config["default_particle_params"] = _normalize_param_keys(
+                data_config.get("default_particle_params"),
+                PARTICLE_PARAM_KEY_ALIASES,
+                [
+                    "defocus_u_angstrom",
+                    "defocus_v_angstrom",
+                    "defocus_angle_deg",
+                ],
+            )
+            normalized["data"] = DataConfig(**cls._filter_kwargs(DataConfig, data_config))
         else:
             normalized["data"] = DataConfig()
 
@@ -439,7 +499,14 @@ class MainConfig:
                 setattr(section_obj, f.name, v)
 
         # Single-key overrides for nested defaults
-        optic_keys = ["kV", "Cs", "Bfac", "scale", "Q0", "phase_shift"]
+        optic_keys = [
+            "voltage_kv",
+            "spherical_aberration_mm",
+            "bfactor",
+            "ctf_scale",
+            "amplitude_contrast",
+            "phase_shift_deg",
+        ]
         for key in optic_keys:
             arg_name = f"default_optic_params_{key}"
             if hasattr(args, arg_name):
@@ -447,7 +514,7 @@ class MainConfig:
                 if v is not None:
                     cfg.data.default_optic_params[key] = float(v)
 
-        particle_keys = ["DeltafU", "DeltafV"]
+        particle_keys = ["defocus_u_angstrom", "defocus_v_angstrom"]
         for key in particle_keys:
             arg_name = f"default_particle_params_{key}"
             if hasattr(args, arg_name):
@@ -455,11 +522,33 @@ class MainConfig:
                 if v is not None:
                     cfg.data.default_particle_params[key] = float(v)
 
-        az_arg = "default_particle_params_azimuthal_angle"
+        az_arg = "default_particle_params_defocus_angle_deg"
         if hasattr(args, az_arg):
             v = getattr(args, az_arg)
             if v is not None:
-                cfg.data.default_particle_params["azimuthal_angle"] = float(v)
+                cfg.data.default_particle_params["defocus_angle_deg"] = float(v)
+
+        cfg.data.default_optic_params = _normalize_param_keys(
+            cfg.data.default_optic_params,
+            OPTIC_PARAM_KEY_ALIASES,
+            [
+                "voltage_kv",
+                "spherical_aberration_mm",
+                "bfactor",
+                "ctf_scale",
+                "amplitude_contrast",
+                "phase_shift_deg",
+            ],
+        )
+        cfg.data.default_particle_params = _normalize_param_keys(
+            cfg.data.default_particle_params,
+            PARTICLE_PARAM_KEY_ALIASES,
+            [
+                "defocus_u_angstrom",
+                "defocus_v_angstrom",
+                "defocus_angle_deg",
+            ],
+        )
 
         output_path_arg = getattr(args, "output_path", None)
         output_path_changed = output_path_arg is not None and cfg.io.output_path != initial_output_path

@@ -13,16 +13,16 @@ data:
   angpix: 0.0
   particle_diameter: null
   default_optic_params:
-    kV: null
-    Cs: null
-    Bfac: null
-    scale: null
-    Q0: null
-    phase_shift: null
+    voltage_kv: null
+    spherical_aberration_mm: null
+    bfactor: null
+    ctf_scale: null
+    amplitude_contrast: null
+    phase_shift_deg: null
   default_particle_params:
-    DeltafU: null
-    DeltafV: null
-    azimuthal_angle: null
+    defocus_u_angstrom: null
+    defocus_v_angstrom: null
+    defocus_angle_deg: null
 
 logging:
   log_dir: ""
@@ -30,10 +30,12 @@ logging:
 
 reconstruction:
   num_volumes: 1
+  external_reconstruct: false
+  full_backprojection: false
   requires_grad: false
   requires_accum: true
-  backproject_chunk: 65536
-  accumulate_chunk: 65536
+  backproject_chunk: 16384
+  accumulate_chunk: 16384
 
 statistics:
   use_noise: true
@@ -44,31 +46,37 @@ statistics:
   init_lowpass_cutoff: null
 
 refinement:
-  num_epochs: 15
+  num_epochs: 50
   fsc_threshold: 0.143
   init_lowpass_angstrom: 30
 
 scheduler:
   confidence_threshold: 0.1
+  fsc_resolution_patience: 3
+  fsc_resolution_improvement_threshold: 0.0
+  fsc_resolution_rebound_threshold: 1.0e-2
   increase_radius_step: 10
   increase_radius_aggressive_factor: 0.25
-  base_healpix_order: 2
+  base_healpix_order: 3
   auto_local_healpix_order: 4
   use_cache: false
   cache_max_healpix_order: 4
   ssd_cache_min_side_length: 150
+  trans_extent_scale: 3.0
 
 pose_search:
   init_healpix_order: 2
-  k_steps: 2
-  t_extent: 35
-  t_ngrid: 7
-  t_xshift: 0
-  t_yshift: 0
+  neighbor_steps: 2
+  init_trans_grid_extent: 5
+  trans_grid_samples: 5
+  trans_grid_x_shift: 0
+  trans_grid_y_shift: 0
   pose_chunk_factor: 2560
   max_candidates: 100
   mse_chunk: 8192
-  candidate_select_threshold: 0.9999
+  candidate_select_threshold: 0.999
+  renormalize_sel_prob: true
+  oversampling_deduplicate: false
 
 reproduce:
   seed: 42
