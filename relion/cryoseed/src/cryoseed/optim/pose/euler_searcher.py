@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any
 
@@ -18,6 +19,9 @@ from cryoseed.ops.transforms import downsample2d, translate_image
 from cryoseed.state import OptimState
 
 from . import shift_grid, so3_grid
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class EulerPoseSearcher(torch.nn.Module):
@@ -49,6 +53,7 @@ class EulerPoseSearcher(torch.nn.Module):
             mse_chunk=config.pose_search.mse_chunk,
             candidate_select_threshold=config.pose_search.candidate_select_threshold,
             renormalize_sel_prob=config.pose_search.renormalize_sel_prob,
+            ring_averaged_mse=config.pose_search.ring_averaged_mse,
         )
 
     def __init__(
@@ -65,10 +70,11 @@ class EulerPoseSearcher(torch.nn.Module):
         trans_grid_x_shift: int = 0,
         trans_grid_y_shift: int = 0,
         pose_chunk_factor: int = 2560,
-        max_candidates: int = 100,
+        max_candidates: int = -1,
         mse_chunk: int = 8192,
         candidate_select_threshold: float = 0.999,
         renormalize_sel_prob: bool = True,
+        ring_averaged_mse: bool = False,
     ):
         super().__init__()
 
@@ -89,6 +95,7 @@ class EulerPoseSearcher(torch.nn.Module):
         self.mse_chunk = mse_chunk
         self.candidate_select_threshold = candidate_select_threshold
         self.renormalize_sel_prob = renormalize_sel_prob
+        self.ring_averaged_mse = bool(ring_averaged_mse)
 
         if self.neighbor_steps < 0:
             raise ValueError("neighbor_steps must be >= 0")
@@ -590,7 +597,8 @@ class EulerPoseSearcher(torch.nn.Module):
             weight_r = torch.zeros_like(precision)
             weight_r[finite] = 0.5 * precision[finite]
             weight_r[0] = 0
-            weight_r = weight_r * self.ring_denom.to(device)
+            if self.ring_averaged_mse:
+                weight_r = weight_r * self.ring_denom.to(device)
 
             weight = weight_r[self.valid_pixel2ring_idx.to(device)].contiguous()  # (P,)
 
@@ -639,7 +647,7 @@ class EulerPoseSearcher(torch.nn.Module):
                 dist is not None
                 and dist.is_available()
                 and dist.is_initialized()
-                and dist.get_world_size() > 1
+                and calculation_parallel_size > 1
             ):
                 dist.all_reduce(mse, dist.ReduceOp.SUM, group)
 
@@ -724,6 +732,20 @@ class EulerPoseSearcher(torch.nn.Module):
             sel_prob_part = prob_sorted[:keep_count].clone()
             if self.renormalize_sel_prob:
                 sel_prob_part = sel_prob_part / sel_prob_part.sum()
+
+            if LOGGER.isEnabledFor(logging.DEBUG):
+                selected_ratio = 100.0 * keep_count / img_cnt
+                top1 = float(prob_sorted[0].item())
+                cutoff = float(prob_cumsum[keep_count - 1].item())
+                LOGGER.debug(
+                    "select_by_prob | candidates=%d/%d (%.2f%%) top1=%.4f cutoff=%.4f",
+                    keep_count,
+                    img_cnt,
+                    selected_ratio,
+                    top1,
+                    cutoff,
+                )
+
             sel_prob_parts.append(sel_prob_part)
             sel2img_idx_parts.append(
                 torch.full(

@@ -27,6 +27,7 @@ data:
 logging:
   log_dir: ""
   log_prefix: cryoseed
+  level: INFO
 
 reconstruction:
   num_volumes: 1
@@ -39,7 +40,7 @@ reconstruction:
 
 statistics:
   use_noise: true
-  use_prior: false
+  use_prior: true
   init_variance: 1.0
   precision_eps: 1.0e-6
   tail_floor: 1.0e-5
@@ -52,11 +53,13 @@ refinement:
 
 scheduler:
   confidence_threshold: 0.1
-  fsc_resolution_patience: 3
-  fsc_resolution_improvement_threshold: 0.0
+  convergence_patience: 3
+  fsc_resolution_improvement_threshold: 1.0e-3
   fsc_resolution_rebound_threshold: 1.0e-2
+  trans_update_rms_threshold: 0.5
   increase_radius_step: 10
   increase_radius_aggressive_factor: 0.25
+  increase_radius_aggressive_fsc_threshold: 0.2
   base_healpix_order: 3
   auto_local_healpix_order: 4
   use_cache: false
@@ -72,11 +75,12 @@ pose_search:
   trans_grid_x_shift: 0
   trans_grid_y_shift: 0
   pose_chunk_factor: 2560
-  max_candidates: 100
+  max_candidates: -1
   mse_chunk: 8192
   candidate_select_threshold: 0.999
   renormalize_sel_prob: true
   oversampling_deduplicate: false
+  ring_averaged_mse: false
 
 reproduce:
   seed: 42

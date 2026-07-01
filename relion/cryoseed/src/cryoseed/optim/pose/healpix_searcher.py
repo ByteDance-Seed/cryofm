@@ -1,3 +1,4 @@
+import logging
 import math
 import os
 import warnings
@@ -22,6 +23,9 @@ from cryoseed.state import OptimState
 from . import shift_grid, so3_grid
 
 from .cache import MemoryProjCache, SSDProjCache
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def pack_proj_cache_key(uid: int, healpix_order: int, side_length: int) -> int:
@@ -95,6 +99,7 @@ class HEALPixPoseSearcher(torch.nn.Module):
             candidate_select_threshold=config.pose_search.candidate_select_threshold,
             renormalize_sel_prob=config.pose_search.renormalize_sel_prob,
             oversampling_deduplicate=config.pose_search.oversampling_deduplicate,
+            ring_averaged_mse=config.pose_search.ring_averaged_mse,
             ssd_cache_root=config.io.ssd_cache_root,
         )
 
@@ -111,11 +116,12 @@ class HEALPixPoseSearcher(torch.nn.Module):
         trans_grid_x_shift: int = 0,
         trans_grid_y_shift: int = 0,
         pose_chunk_factor: int = 2560,
-        max_candidates: int = 100,
+        max_candidates: int = -1,
         mse_chunk: int = 8192,
         candidate_select_threshold: float = 0.999,
         renormalize_sel_prob: bool = True,
         oversampling_deduplicate: bool = False,
+        ring_averaged_mse: bool = False,
         ssd_cache_root: str | None = None,
     ):
         super().__init__()
@@ -137,6 +143,7 @@ class HEALPixPoseSearcher(torch.nn.Module):
         self.candidate_select_threshold = candidate_select_threshold
         self.renormalize_sel_prob = renormalize_sel_prob
         self.oversampling_deduplicate = bool(oversampling_deduplicate)
+        self.ring_averaged_mse = bool(ring_averaged_mse)
         self.ssd_cache_root = ssd_cache_root
 
         if self.pose_chunk_factor is not None and self.pose_chunk_factor <= 0:
@@ -1036,7 +1043,8 @@ class HEALPixPoseSearcher(torch.nn.Module):
             weight_r = torch.zeros_like(precision)
             weight_r[finite] = 0.5 * precision[finite]
             weight_r[0] = 0
-            weight_r = weight_r * self.ring_denom
+            if self.ring_averaged_mse:
+                weight_r = weight_r * self.ring_denom
 
             weight = weight_r[self.valid_pixel2ring_idx].contiguous()  # (P,)
 
@@ -1159,7 +1167,8 @@ class HEALPixPoseSearcher(torch.nn.Module):
             weight_r = torch.zeros_like(precision)
             weight_r[finite] = 0.5 * precision[finite]
             weight_r[0] = 0
-            weight_r = weight_r * self.ring_denom
+            if self.ring_averaged_mse:
+                weight_r = weight_r * self.ring_denom
 
             weight = weight_r[self.valid_pixel2ring_idx].contiguous()  # (P,)
 
@@ -1201,7 +1210,7 @@ class HEALPixPoseSearcher(torch.nn.Module):
                 dist is not None
                 and dist.is_available()
                 and dist.is_initialized()
-                and dist.get_world_size() > 1
+                and calculation_parallel_size > 1
             ):
                 dist.all_reduce(mse, dist.ReduceOp.SUM, group)
             
@@ -1285,6 +1294,20 @@ class HEALPixPoseSearcher(torch.nn.Module):
             sel_prob_part = prob_sorted[:keep_count].clone()
             if self.renormalize_sel_prob:
                 sel_prob_part = sel_prob_part / sel_prob_part.sum()
+
+            if LOGGER.isEnabledFor(logging.DEBUG):
+                selected_ratio = 100.0 * keep_count / img_cnt
+                top1 = float(prob_sorted[0].item())
+                cutoff = float(prob_cumsum[keep_count - 1].item())
+                LOGGER.debug(
+                    "select_by_prob | candidates=%d/%d (%.2f%%) top1=%.4f cutoff=%.4f",
+                    keep_count,
+                    img_cnt,
+                    selected_ratio,
+                    top1,
+                    cutoff,
+                )
+
             sel_prob_parts.append(sel_prob_part)
             sel2img_idx_parts.append(
                 torch.full(

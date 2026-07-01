@@ -73,6 +73,7 @@ _FIELD_HELP: dict[tuple[str, str], str] = {
 
     ("logging", "log_dir"): "Log directory (default: output_path/logs).",
     ("logging", "log_prefix"): "Log filename prefix.",
+    ("logging", "level"): "Root log level (DEBUG, INFO, WARNING, ERROR, CRITICAL).",
 
     ("reconstruction", "num_volumes"): "Number of volumes/classes K (homorefine requires K=1).",
     ("reconstruction", "external_reconstruct"): "Enable external reconstruction data export under output_path/external_reconstruct.",
@@ -94,11 +95,13 @@ _FIELD_HELP: dict[tuple[str, str], str] = {
     ("refinement", "init_lowpass_angstrom"): "Initial low-pass resolution (Angstrom) for setting side_length.",
 
     ("scheduler", "confidence_threshold"): "avg_confidence threshold for aggressive side_length growth.",
-    ("scheduler", "fsc_resolution_patience"): "Number of consecutive epochs without meaningful FSC-resolution gain before declaring convergence.",
+    ("scheduler", "convergence_patience"): "Number of consecutive epochs required before declaring convergence once both FSC and translation-update conditions are satisfied.",
     ("scheduler", "fsc_resolution_improvement_threshold"): "Minimum FSC-resolution improvement (Angstrom) required to reset the no-gain counter.",
     ("scheduler", "fsc_resolution_rebound_threshold"): "Maximum FSC-resolution rebound (Angstrom) still treated as no meaningful gain.",
+    ("scheduler", "trans_update_rms_threshold"): "Maximum translation-update RMS (pixels) treated as a small pose update for convergence.",
     ("scheduler", "increase_radius_step"): "Default radius increment in frequency marching (pixels).",
     ("scheduler", "increase_radius_aggressive_factor"): "Extra radius increment factor when confident.",
+    ("scheduler", "increase_radius_aggressive_fsc_threshold"): "Minimum FSC at the current side_length limit required to use the aggressive radius increment.",
     ("scheduler", "base_healpix_order"): (
         "Starting HEALPix order used while the scheduler stays in global HEALPix search."
     ),
@@ -121,6 +124,7 @@ _FIELD_HELP: dict[tuple[str, str], str] = {
     ("pose_search", "mse_chunk"): "Chunk size for MSE/likelihood evaluation.",
     ("pose_search", "candidate_select_threshold"): "Cumulative probability threshold for candidate selection.",
     ("pose_search", "renormalize_sel_prob"): "Renormalize selected per-image candidate probabilities to sum to 1 after truncation.",
+    ("pose_search", "ring_averaged_mse"): "Average MSE contributions within each Fourier ring instead of summing them.",
 
     ("reproduce", "seed"): "Random seed.",
     ("reproduce", "deterministic"): "Enable deterministic mode (may reduce performance).",
@@ -185,6 +189,7 @@ def _add_config_overrides(parser: argparse.ArgumentParser) -> None:
         "num_epochs": ["-n"],
         "batch_size": ["-b"],
         "num_workers": ["-w"],
+        "level": ["--log-level"],
     }
 
     for section_field in fields(MainConfig):

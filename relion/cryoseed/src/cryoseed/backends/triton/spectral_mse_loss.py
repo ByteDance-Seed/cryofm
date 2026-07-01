@@ -79,6 +79,10 @@ def spectral_mse_loss(
         out: Optional output tensor for the unreduced per-pair/per-tile loss values.
             This buffer is filled before any final ``reduction`` is applied and must already be
             on ``input.device``.
+            ``out`` is treated as a preallocated write buffer rather than a differentiable
+            input and therefore must have ``requires_grad=False``. If the unreduced loss needs
+            to remain in the autograd graph, do not pass ``out`` and use the returned tensor
+            instead.
         prefer_2stage: Optional override for the 2-stage Triton reduction path.
         reduction: Specifies the reduction to apply over the per-pair/per-tile loss outputs:
             ``'none'`` | ``'mean'`` | ``'sum'``.

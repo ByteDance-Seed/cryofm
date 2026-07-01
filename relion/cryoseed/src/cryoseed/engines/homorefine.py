@@ -165,6 +165,8 @@ class HomoRefineEngine(torch.nn.Module):
         # placeholder
         self.volume_real_half0 = None
         self.volume_real_half1 = None
+        self._init_lowpass_side_length: int | None = None
+        self.register_buffer("_init_lowpass_mask", None, persistent=False)
 
     def _load_optional_module_state(self, module, state_dict, name: str) -> None:
         if module is None:
@@ -310,9 +312,45 @@ class HomoRefineEngine(torch.nn.Module):
         self.pose_searcher_half0.refresh()
         self.pose_searcher_half1.refresh()
 
+    def _ensure_init_lowpass_cache(self, volume: torch.Tensor) -> tuple[int, torch.Tensor]:
+        init_lowpass_angstrom = float(self.config.refinement.init_lowpass_angstrom)
+        if init_lowpass_angstrom <= 0:
+            raise ValueError(
+                "refinement.init_lowpass_angstrom must be > 0, got "
+                f"{self.config.refinement.init_lowpass_angstrom}"
+            )
+
+        side_length = 2 * int(
+            self.config.data.image_size * self.config.data.angpix / init_lowpass_angstrom
+        )
+        side_length = max(1, min(int(self.config.data.image_size), int(side_length)))
+
+        mask = self._init_lowpass_mask
+        if (
+            self._init_lowpass_side_length != side_length
+            or mask is None
+            or mask.shape != volume.shape
+            or mask.device != volume.device
+        ):
+            mask = lowpass_mask(volume, side_length, ndim=3).to(dtype=torch.bool)
+            self._init_lowpass_mask = mask
+            self._init_lowpass_side_length = side_length
+
+        return side_length, mask
+
     def initialize(self):
         # State
-        init_side_length = 2 * int(self.config.data.image_size * self.config.data.angpix / self.config.refinement.init_lowpass_angstrom)
+        init_volume_real = None
+        init_volume = None
+        init_side_length = None
+        init_mask = None
+
+        with mrcfile.open(self.config.io.ref_volume_path, permissive=True) as mrc:
+            init_volume_real = torch.tensor(mrc.data, device=self.device)
+
+        init_volume_real = init_volume_real.unsqueeze(0)
+        init_volume = primal_to_fourier_3d(init_volume_real)
+        init_side_length, init_mask = self._ensure_init_lowpass_cache(init_volume)
         self.state.schedule.side_length = init_side_length
         self.state.schedule.full_backprojection = (
             bool(self.config.reconstruction.full_backprojection)
@@ -320,14 +358,7 @@ class HomoRefineEngine(torch.nn.Module):
         )
 
         # Volume
-        with mrcfile.open(self.config.io.ref_volume_path, permissive=True) as mrc:
-            init_volume_real = torch.tensor(mrc.data,device=self.device)
-
-        init_volume_real = init_volume_real.unsqueeze(0)
-        init_volume = primal_to_fourier_3d(init_volume_real)
-
-        mask = lowpass_mask(init_volume, init_side_length, ndim=3)
-        init_volume *= mask
+        init_volume *= init_mask
 
         self.volume_half0.load_volume(init_volume)
         self.volume_half1.load_volume(init_volume)
@@ -351,6 +382,20 @@ class HomoRefineEngine(torch.nn.Module):
         # norm correction
         # real-space mask
         return
+
+    @torch.no_grad()
+    def _average_half_low_frequencies(self) -> None:
+        """Share low-frequency Fourier coefficients between the two half maps."""
+        volume_half0 = self.volume_half0.volume.detach().clone()
+        volume_half1 = self.volume_half1.volume.detach().clone()
+        _, shared_mask = self._ensure_init_lowpass_cache(volume_half0)
+        shared_volume = 0.5 * (volume_half0 + volume_half1)
+
+        volume_half0 = torch.where(shared_mask, shared_volume, volume_half0)
+        volume_half1 = torch.where(shared_mask, shared_volume, volume_half1)
+
+        self.volume_half0.load_volume(volume_half0)
+        self.volume_half1.load_volume(volume_half1)
 
     def evaluate(self):
         vol0 = self.volume_real_half0.squeeze(0).detach().cpu().numpy()
@@ -654,7 +699,11 @@ class HomoRefineEngine(torch.nn.Module):
         # set seed
         set_seed(self.config.reproduce.seed, self.config.reproduce.deterministic)
 
-        logger = setup_logging(self.config.logging.log_dir, filename_prefix=self.config.logging.log_prefix)
+        logger = setup_logging(
+            self.config.logging.log_dir,
+            filename_prefix=self.config.logging.log_prefix,
+            level=self.config.logging.level,
+        )
         logger.info("Program started")
         log_config(logger, self.config)
 
@@ -715,6 +764,7 @@ class HomoRefineEngine(torch.nn.Module):
 
                 self.solver_half0.zero_accum()
                 self.solver_half1.zero_accum()
+                self._average_half_low_frequencies()
 
                 # half 0
                 if self.device.type == "cuda":
@@ -814,9 +864,15 @@ class HomoRefineEngine(torch.nn.Module):
                         logger,
                         title=f"Converged At Epoch {epoch}",
                         lines=[
-                            "fsc_resolution has shown no meaningful gain for "
+                            "convergence conditions have been met for "
+                            f"{self.config.scheduler.convergence_patience} consecutive epochs",
+                            "FSC has shown no meaningful gain for "
                             f"{self.state.progress.num_epochs_without_resolution_gain} consecutive epochs "
                             f"(resolution={float(self.state.metrics.fsc_resolution):.4f} A)",
+                            "translation update RMS has stayed below threshold for "
+                            f"{self.state.progress.num_epochs_with_small_trans_update} consecutive epochs "
+                            f"(trans_rms={self.state.metrics.trans_update_rms:.4f} px, "
+                            f"threshold={self.config.scheduler.trans_update_rms_threshold:.4f} px)",
                         ],
                     )
 
@@ -859,9 +915,13 @@ class HomoRefineEngine(torch.nn.Module):
                     logger.info(
                         "Refinement stopped early at epoch %d | reason=%s",
                         epoch,
-                        "fsc_resolution has shown no meaningful gain for "
+                        "convergence conditions satisfied: FSC has shown no meaningful gain for "
                         f"{self.state.progress.num_epochs_without_resolution_gain} consecutive epochs "
-                        f"(resolution={float(self.state.metrics.fsc_resolution):.4f} A)",
+                        f"(resolution={float(self.state.metrics.fsc_resolution):.4f} A), "
+                        "translation update RMS has stayed below threshold for "
+                        f"{self.state.progress.num_epochs_with_small_trans_update} consecutive epochs "
+                        f"(trans_rms={self.state.metrics.trans_update_rms:.4f} px, "
+                        f"threshold={self.config.scheduler.trans_update_rms_threshold:.4f} px)",
                     )
                     break
 

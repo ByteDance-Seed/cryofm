@@ -32,6 +32,7 @@ class ProgressState:
     epoch: int = 0
     half: int = 0  # current half
     num_epochs_without_resolution_gain: int = 0
+    num_epochs_with_small_trans_update: int = 0
     has_converged: bool = False
 
 
@@ -104,6 +105,7 @@ class OptimState:
             "epoch",
             "half",
             "num_epochs_without_resolution_gain",
+            "num_epochs_with_small_trans_update",
         )
         st.progress = ProgressState(**progress_kwargs)
 

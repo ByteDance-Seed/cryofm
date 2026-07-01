@@ -11,6 +11,12 @@ __all__ = ["central_slice_embed_batched_kernel"]
         triton.Config({"BLOCK": 1024}, num_warps=8),
     ],
     key=["L", "P"],
+    # Triton autotune runs real candidate kernels, so this accumulation buffer
+    # can be polluted during config search. Backprojection reuses the same
+    # output volumes across chunks, meaning they may already contain partial
+    # sums from earlier launches. Use restore_value so autotune probes see the
+    # same initial state without zeroing or double-accumulating the volume.
+    restore_value=["out_numer_cplx_ptr", "out_denom_ptr"],
 )
 @triton.jit
 def central_slice_embed_batched_kernel(

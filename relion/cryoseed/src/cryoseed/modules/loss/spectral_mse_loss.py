@@ -6,6 +6,8 @@ Notes:
     - ``weight`` is stored as a registered buffer so it follows ``.to(device)`` / ``.cuda()``.
     - If you need dynamic per-step ``weight``, call :func:`cryoseed.ops.loss.spectral_mse_loss`
       directly.
+    - If you need low-level output-buffer control via ``out``, call
+      :func:`cryoseed.ops.loss.spectral_mse_loss` directly.
 """
 
 from __future__ import annotations
@@ -59,7 +61,6 @@ class SpectralMSELoss(nn.Module):
         *,
         input_indices: Tensor | None = None,
         target_indices: Tensor | None = None,
-        out: Tensor | None = None,
     ) -> Tensor:
         """Compute the loss.
 
@@ -68,7 +69,6 @@ class SpectralMSELoss(nn.Module):
             target: Complex target tensor.
             input_indices: Optional indices for indexed mode.
             target_indices: Optional indices for indexed mode.
-            out: Optional float32 buffer to receive unreduced values.
 
         Returns:
             - If ``self.reduction == 'none'``: unreduced loss tensor.
@@ -81,7 +81,6 @@ class SpectralMSELoss(nn.Module):
             weight=self.weight,
             input_indices=input_indices,
             target_indices=target_indices,
-            out=out,
             prefer_2stage=None,
             reduction=self.reduction,
         )

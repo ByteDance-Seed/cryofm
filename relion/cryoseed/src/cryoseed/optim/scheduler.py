@@ -12,11 +12,13 @@ class FrequencyMarchingScheduler:
         image_size=None,
         particle_diameter=None,
         confidence_threshold=0.1,
-        fsc_resolution_patience=3,
-        fsc_resolution_improvement_threshold=0.0,
+        convergence_patience=3,
+        fsc_resolution_improvement_threshold=1e-3,
         fsc_resolution_rebound_threshold=1e-2,
+        trans_update_rms_threshold=0.5,
         increase_radius_step=10,
         increase_radius_aggressive_factor=0.25,
+        increase_radius_aggressive_fsc_threshold=0.2,
         base_healpix_order=3,
         auto_local_healpix_order=4,
         use_cache=False,
@@ -31,15 +33,19 @@ class FrequencyMarchingScheduler:
         self.image_size = image_size
         self.particle_diameter = particle_diameter
         self.confidence_threshold = confidence_threshold
-        self.fsc_resolution_patience = int(fsc_resolution_patience)
+        self.convergence_patience = int(convergence_patience)
         self.fsc_resolution_improvement_threshold = float(
             fsc_resolution_improvement_threshold
         )
         self.fsc_resolution_rebound_threshold = float(
             fsc_resolution_rebound_threshold
         )
+        self.trans_update_rms_threshold = float(trans_update_rms_threshold)
         self.increase_radius_step = increase_radius_step
         self.increase_radius_aggressive_factor = increase_radius_aggressive_factor
+        self.increase_radius_aggressive_fsc_threshold = float(
+            increase_radius_aggressive_fsc_threshold
+        )
         self.base_healpix_order = base_healpix_order
         self.auto_local_healpix_order = auto_local_healpix_order
         self.use_cache = bool(use_cache)
@@ -56,8 +62,8 @@ class FrequencyMarchingScheduler:
         self.image_size = config.data.image_size
         self.particle_diameter = config.data.particle_diameter
         self.confidence_threshold = config.scheduler.confidence_threshold
-        self.fsc_resolution_patience = int(
-            config.scheduler.fsc_resolution_patience
+        self.convergence_patience = int(
+            config.scheduler.convergence_patience
         )
         self.fsc_resolution_improvement_threshold = float(
             config.scheduler.fsc_resolution_improvement_threshold
@@ -65,8 +71,14 @@ class FrequencyMarchingScheduler:
         self.fsc_resolution_rebound_threshold = float(
             config.scheduler.fsc_resolution_rebound_threshold
         )
+        self.trans_update_rms_threshold = float(
+            config.scheduler.trans_update_rms_threshold
+        )
         self.increase_radius_step = config.scheduler.increase_radius_step
         self.increase_radius_aggressive_factor = config.scheduler.increase_radius_aggressive_factor
+        self.increase_radius_aggressive_fsc_threshold = float(
+            config.scheduler.increase_radius_aggressive_fsc_threshold
+        )
         self.base_healpix_order = config.scheduler.base_healpix_order
         self.auto_local_healpix_order = config.scheduler.auto_local_healpix_order
         self.use_cache = bool(config.scheduler.use_cache)
@@ -79,8 +91,8 @@ class FrequencyMarchingScheduler:
         return self
 
     def _should_force_full_backprojection_for_epoch(self, epoch: int) -> bool:
-        if self.fsc_resolution_patience < 1:
-            raise ValueError("scheduler.fsc_resolution_patience must be >= 1")
+        if self.convergence_patience < 1:
+            raise ValueError("scheduler.convergence_patience must be >= 1")
 
         is_last_configured_epoch = (
             self.num_epochs is not None
@@ -88,19 +100,23 @@ class FrequencyMarchingScheduler:
         )
         one_epoch_from_convergence = (
             self.state.progress.num_epochs_without_resolution_gain
-            >= self.fsc_resolution_patience - 1
+            >= self.convergence_patience - 1
+            and self.state.progress.num_epochs_with_small_trans_update
+            >= self.convergence_patience - 1
         )
         return is_last_configured_epoch or one_epoch_from_convergence
 
     def _update_convergence_state(self) -> None:
-        if self.fsc_resolution_patience < 1:
-            raise ValueError("scheduler.fsc_resolution_patience must be >= 1")
+        if self.convergence_patience < 1:
+            raise ValueError("scheduler.convergence_patience must be >= 1")
         if self.fsc_resolution_improvement_threshold < 0:
             raise ValueError(
                 "scheduler.fsc_resolution_improvement_threshold must be >= 0"
             )
         if self.fsc_resolution_rebound_threshold < 0:
             raise ValueError("scheduler.fsc_resolution_rebound_threshold must be >= 0")
+        if self.trans_update_rms_threshold < 0:
+            raise ValueError("scheduler.trans_update_rms_threshold must be >= 0")
 
         resolution_change = self.state.metrics.fsc_resolution_change
         if resolution_change is None:
@@ -112,9 +128,16 @@ class FrequencyMarchingScheduler:
         else:
             self.state.progress.num_epochs_without_resolution_gain += 1
 
+        if float(self.state.metrics.trans_update_rms) <= self.trans_update_rms_threshold:
+            self.state.progress.num_epochs_with_small_trans_update += 1
+        else:
+            self.state.progress.num_epochs_with_small_trans_update = 0
+
         self.state.progress.has_converged = (
             self.state.progress.num_epochs_without_resolution_gain
-            >= self.fsc_resolution_patience
+            >= self.convergence_patience
+            and self.state.progress.num_epochs_with_small_trans_update
+            >= self.convergence_patience
         )
     
     def step(self):
@@ -238,7 +261,11 @@ class FrequencyMarchingScheduler:
         # (closer to convergence), so we can increase ``L`` more aggressively.
         # A small ``avg_confidence`` means candidates are similar, so we increase
         # ``L`` more conservatively.
-        if self.state.metrics.avg_confidence > self.confidence_threshold:
+        fsc_at_side_length_limit = fsc_scores[self.state.schedule.side_length // 2]
+        if (
+            self.state.metrics.avg_confidence > self.confidence_threshold
+            and fsc_at_side_length_limit > self.increase_radius_aggressive_fsc_threshold
+        ):
             current_radius += self.increase_radius_aggressive_factor * self.image_size // 2
         else:
             current_radius += self.increase_radius_step

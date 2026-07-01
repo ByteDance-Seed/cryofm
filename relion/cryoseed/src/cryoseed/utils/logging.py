@@ -58,6 +58,18 @@ def _make_formatter() -> logging.Formatter:
     return logging.Formatter(fmt=fmt, datefmt="%Y-%m-%d %H:%M:%S")
 
 
+def _coerce_level(level: int | str) -> int:
+    if isinstance(level, int):
+        return level
+    if isinstance(level, str):
+        normalized = level.strip().upper()
+        if normalized in logging._nameToLevel:
+            coerced = logging._nameToLevel[normalized]
+            if isinstance(coerced, int):
+                return coerced
+    raise ValueError(f"Invalid log level: {level!r}")
+
+
 def _json_default(obj: Any):
     if is_dataclass(obj):
         return asdict(obj)
@@ -104,7 +116,7 @@ def setup_logging(
     log_dir: str | os.PathLike,
     *,
     filename_prefix: str = "train",
-    level: int = logging.INFO,
+    level: int | str = logging.INFO,
     capture_warnings: bool = True,
     overwrite_handlers: bool = True,
 ) -> logging.Logger:
@@ -112,6 +124,7 @@ def setup_logging(
 
     rank = get_rank()
     world_size = get_world_size()
+    level = _coerce_level(level)
 
     log_dir = Path(log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)

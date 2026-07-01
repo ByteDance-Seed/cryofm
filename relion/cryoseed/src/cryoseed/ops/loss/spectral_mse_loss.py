@@ -156,6 +156,11 @@ def spectral_mse_loss(
             This buffer is filled before any final ``reduction`` is applied and must already be
             on ``input.device``.
 
+            ``out`` is treated as a preallocated write buffer rather than a differentiable
+            input and therefore must have ``requires_grad=False``. If the unreduced loss needs
+            to remain in the autograd graph, do not pass ``out`` and use the returned tensor
+            instead.
+
             Broadcast mode notes:
                 ``out`` can be either a flat contiguous 1D tensor of shape
                 ``(B * C_input * C_target,)`` or a 3D view of shape ``(B, C_input, C_target)``.

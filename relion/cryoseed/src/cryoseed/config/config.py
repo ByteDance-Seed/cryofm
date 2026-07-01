@@ -90,6 +90,7 @@ class LoggingConfig:
 
     log_dir: str = ""
     log_prefix: str = "cryoseed"
+    level: str = "INFO"
 
 
 @dataclass
@@ -112,7 +113,7 @@ class StatisticsConfig:
     """Noise / prior statistics."""
 
     use_noise: bool = True
-    use_prior: bool = False
+    use_prior: bool = True
 
     init_variance: float = 1.0
     precision_eps: float = 1e-6
@@ -134,13 +135,15 @@ class SchedulerConfig:
 
     # confidence-driven update
     confidence_threshold: float = 0.1
-    fsc_resolution_patience: int = 3
-    fsc_resolution_improvement_threshold: float = 0.0
+    convergence_patience: int = 3
+    fsc_resolution_improvement_threshold: float = 1e-3
     fsc_resolution_rebound_threshold: float = 1e-2
+    trans_update_rms_threshold: float = 0.5
 
     # side_length update policy
     increase_radius_step: int = 10
     increase_radius_aggressive_factor: float = 0.25
+    increase_radius_aggressive_fsc_threshold: float = 0.2
 
     # Starting HEALPix order used while the scheduler stays in global search
     base_healpix_order: int = 3
@@ -166,11 +169,12 @@ class PoseSearchConfig:
     trans_grid_y_shift: int = 0
 
     pose_chunk_factor: int | None = 2560
-    max_candidates: int = 100
+    max_candidates: int = -1
     mse_chunk: int = 8192
     candidate_select_threshold: float = 0.999
     renormalize_sel_prob: bool = True
     oversampling_deduplicate: bool = False
+    ring_averaged_mse: bool = False
 
 
 @dataclass

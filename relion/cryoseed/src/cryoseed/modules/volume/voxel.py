@@ -300,7 +300,11 @@ class VoxelGrid(Volume):
         rotation: Tensor,
         side_length: int | None = None,
     ) -> Tensor:
-        """Project Fourier volumes to the z=0 central slice.
+        """Project Fourier volumes to the z=0 central slice without autograd.
+
+        This is the default inference/search entry point. It shares the same
+        implementation as :meth:`forward` by calling :meth:`_project`, but runs
+        under ``torch.no_grad()``.
 
         Args:
             rotation: Rotation matrices with shape ``(K, Q, 3, 3)``, where
@@ -550,7 +554,11 @@ class VoxelGrid(Volume):
         self.accum_denom.zero_()
 
     def forward(self, rotation: Tensor) -> Tensor:
-        """Forward alias of :meth:`project` (with ``side_length=grid_size``).
+        """Differentiable projection path for module-style invocation.
+
+        Unlike :meth:`project`, this method does not run under ``torch.no_grad()``.
+        It calls the shared :meth:`_project` implementation with
+        ``side_length=grid_size`` so gradients can flow back to ``self.volume``.
 
         Args:
             rotation: Rotation matrices with shape ``(K, Q, 3, 3)``.
