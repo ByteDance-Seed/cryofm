@@ -2,7 +2,7 @@
 
 **cryoSeed** is a modular cryo-EM 3D reconstruction module included as part of this repository update. It provides PyTorch-native components for building and experimenting with 3D reconstruction workflows, with an emphasis on composability, differentiability, and integration with modern machine learning pipelines.
 
-cryoSeed is intended to expose core reconstruction functionality in a form that can be reused, modified, and extended within this codebase. Its components cover common elements of cryo-EM reconstruction, including data loading, pose searching, Fourier-domain volume representation, projection operations, noise and prior statistics, EM-style optimization, and evaluation utilities such as FSC. The module is designed to support method development and prototyping, especially for experiments that connect cryo-EM reconstruction with AI-based priors, like cryoFM, with `./srcipts/cryoseed_wrapper.py`. 
+cryoSeed is intended to expose core reconstruction functionality in a form that can be reused, modified, and extended within this codebase. Its components cover common elements of cryo-EM reconstruction, including data loading, pose searching, Fourier-domain volume representation, projection operations, noise and prior statistics, EM-style optimization, and evaluation utilities such as FSC. The module is designed to support method development and prototyping, especially for experiments that connect cryo-EM reconstruction with AI-based priors, like cryoFM, with `./scripts/cryoseed_wrapper.py`. 
 
 ---
 
