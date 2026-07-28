@@ -11,6 +11,48 @@ from cryoseed.backends.triton.spectral_mse_loss import spectral_mse_loss as spec
 pytestmark = CUDA_TRITON_REQUIRED
 
 
+@pytest.mark.parametrize(("reduction", "spectral_reduction"), [("mean", "mean"), ("sum", "sum")])
+def test_triton_spectral_mse_auto_matches_explicit_spectral_reduction(
+    reduction: str, spectral_reduction: str
+):
+    torch.manual_seed(2)
+    device = torch.device("cuda")
+
+    b, ci, co, h, w = 1, 2, 2, 2, 3
+    x = torch.randn(b, ci, h, w, device=device, dtype=torch.complex64)
+    y = torch.randn(b, co, h, w, device=device, dtype=torch.complex64)
+    weight = 0.2 + torch.rand(h, w, device=device, dtype=torch.float32)
+
+    triton_auto = spectral_mse_loss_triton(x, y, weight=weight, reduction=reduction)
+    triton_explicit = spectral_mse_loss_triton(
+        x, y, weight=weight, reduction=reduction, spectral_reduction=spectral_reduction
+    )
+    torch_auto = spectral_mse_loss_torch(x, y, weight=weight, reduction=reduction)
+    torch_explicit = spectral_mse_loss_torch(
+        x, y, weight=weight, reduction=reduction, spectral_reduction=spectral_reduction
+    )
+
+    torch.testing.assert_close(triton_auto, triton_explicit, rtol=2e-4, atol=2e-4)
+    torch.testing.assert_close(torch_auto, torch_explicit, rtol=2e-4, atol=2e-4)
+    torch.testing.assert_close(triton_auto, torch_auto, rtol=2e-4, atol=2e-4)
+
+
+def test_triton_spectral_mse_none_requires_explicit_spectral_reduction():
+    torch.manual_seed(2)
+    device = torch.device("cuda")
+
+    b, ci, co, h, w = 1, 2, 2, 2, 3
+    x = torch.randn(b, ci, h, w, device=device, dtype=torch.complex64)
+    y = torch.randn(b, co, h, w, device=device, dtype=torch.complex64)
+    weight = 0.2 + torch.rand(h, w, device=device, dtype=torch.float32)
+
+    with pytest.raises(ValueError, match="spectral_reduction must be explicitly set"):
+        spectral_mse_loss_torch(x, y, weight=weight, reduction="none")
+
+    with pytest.raises(ValueError, match="spectral_reduction must be explicitly set"):
+        spectral_mse_loss_triton(x, y, weight=weight, reduction="none")
+
+
 @pytest.mark.parametrize("reduction", ["sum", "mean"])
 def test_triton_spectral_mse_broadcast_backward_matches_torch(reduction: str):
     torch.manual_seed(3)
@@ -34,12 +76,14 @@ def test_triton_spectral_mse_broadcast_backward_matches_torch(reduction: str):
         y_triton,
         weight=w_triton,
         reduction=reduction,
+        spectral_reduction=reduction,
     )
     loss_torch = spectral_mse_loss_torch(
         x_torch,
         y_torch,
         weight=w_torch,
         reduction=reduction,
+        spectral_reduction=reduction,
     )
 
     torch.testing.assert_close(loss_triton, loss_torch, rtol=2e-4, atol=2e-4)
@@ -62,7 +106,13 @@ def test_triton_spectral_mse_broadcast_backward_matches_finite_difference():
     weight = (0.2 + torch.rand(h, w, device=device, dtype=torch.float32)).requires_grad_(True)
 
     def loss_fn(inp: torch.Tensor, tgt: torch.Tensor, wt: torch.Tensor) -> torch.Tensor:
-        return spectral_mse_loss_triton(inp, tgt, weight=wt, reduction="sum")
+        return spectral_mse_loss_triton(
+            inp,
+            tgt,
+            weight=wt,
+            reduction="sum",
+            spectral_reduction="sum",
+        )
 
     loss = loss_fn(x, y, weight)
     loss.backward()
@@ -112,6 +162,7 @@ def test_triton_spectral_mse_indexed_backward_matches_torch(reduction: str):
         input_indices=input_indices,
         target_indices=target_indices,
         reduction=reduction,
+        spectral_reduction=reduction,
     )
     loss_torch = spectral_mse_loss_torch(
         x_torch,
@@ -120,6 +171,7 @@ def test_triton_spectral_mse_indexed_backward_matches_torch(reduction: str):
         input_indices=input_indices,
         target_indices=target_indices,
         reduction=reduction,
+        spectral_reduction=reduction,
     )
 
     torch.testing.assert_close(loss_triton, loss_torch, rtol=2e-4, atol=2e-4)
@@ -150,6 +202,7 @@ def test_triton_spectral_mse_indexed_backward_matches_finite_difference():
             input_indices=input_indices,
             target_indices=target_indices,
             reduction="sum",
+            spectral_reduction="sum",
         )
 
     loss = loss_fn(x, y, weight)

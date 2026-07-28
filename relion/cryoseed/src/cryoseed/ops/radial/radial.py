@@ -103,7 +103,7 @@ def radial_broadcast(
 
 
 @lru_cache(maxsize=4)
-def _cached_radial_avg_cache(
+def _cached_radial_cache(
     device_type: str,
     device_index: int | None,
     ndim: int,
@@ -115,7 +115,7 @@ def _cached_radial_avg_cache(
         if device_index is None
         else torch.device(device_type, device_index)
     )
-    return _build_radial_avg_cache(
+    return _build_radial_cache(
         device=device,
         side_length=int(side_length),
         max_radius=int(max_radius),
@@ -123,12 +123,17 @@ def _cached_radial_avg_cache(
     )
 
 
+def clear_radial_cache():
+    """Clear the shared radial metadata cache used by ops in this module."""
+    _cached_radial_cache.cache_clear()
+
+
 def clear_radial_average_cache():
-    """Clear the internal index cache used by `radial_average(use_cache=True)`."""
-    _cached_radial_avg_cache.cache_clear()
+    """Backward-compatible alias for clearing the shared radial metadata cache."""
+    clear_radial_cache()
 
 
-def _build_radial_avg_cache(
+def _build_radial_cache(
     device: torch.device,
     side_length: int,
     max_radius: int,
@@ -149,14 +154,40 @@ def _build_radial_avg_cache(
     num_radial_bins = max_radius + 1
     radial_indices = r_flat.index_select(0, valid_indices)
     radial_bin_counts = torch.bincount(radial_indices, minlength=num_radial_bins)
+    radial_denom = torch.zeros((num_radial_bins,), device=device, dtype=torch.float32)
+    radial_denom[radial_bin_counts > 0] = 1.0 / radial_bin_counts[radial_bin_counts > 0].to(torch.float32)
+    radial_weight = radial_denom.index_select(0, radial_indices)
 
     return {
         "num_points": num_points,
         "valid_indices": valid_indices,
         "radial_indices": radial_indices,
         "radial_bin_counts": radial_bin_counts,
+        "radial_denom": radial_denom,
+        "radial_weight": radial_weight,
         "num_radial_bins": num_radial_bins,
     }
+
+
+def _get_radial_cache(
+    device: torch.device,
+    side_length: int,
+    max_radius: int,
+    ndim: int,
+    *,
+    use_cache: bool,
+):
+    return (
+        _cached_radial_cache(
+            device.type,
+            device.index,
+            ndim,
+            side_length,
+            max_radius,
+        )
+        if use_cache
+        else _build_radial_cache(device, side_length, max_radius, ndim)
+    )
 
 
 def radial_average(
@@ -198,16 +229,12 @@ def radial_average(
     batch_shape = input.shape[:-ndim]
     batch_size = int(math.prod(batch_shape)) if len(batch_shape) > 0 else 1
 
-    cache = (
-        _cached_radial_avg_cache(
-            input.device.type,
-            input.device.index,
-            ndim,
-            side_length,
-            max_radius,
-        )
-        if use_cache
-        else _build_radial_avg_cache(input.device, side_length, max_radius, ndim)
+    cache = _get_radial_cache(
+        input.device,
+        side_length,
+        max_radius,
+        ndim,
+        use_cache=use_cache,
     )
 
     valid_indices = cache["valid_indices"]

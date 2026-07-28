@@ -36,23 +36,38 @@ class SpectralMSELoss(nn.Module):
         *,
         weight: Tensor | None = None,
         reduction: Literal["none", "mean", "sum"] = "mean",
+        spectral_reduction: Literal["auto", "mean", "sum"] = "auto",
     ) -> None:
         super().__init__()
 
         if reduction not in ("none", "mean", "sum"):
             raise ValueError(f"reduction must be one of 'none', 'mean', 'sum'; got {reduction!r}")
+        if spectral_reduction not in ("auto", "mean", "sum"):
+            raise ValueError(
+                "spectral_reduction must be one of 'auto', 'mean', 'sum'; "
+                f"got {spectral_reduction!r}"
+            )
+        if reduction == "none" and spectral_reduction == "auto":
+            raise ValueError(
+                "spectral_reduction must be explicitly set to 'mean' or 'sum' "
+                "when reduction='none'"
+            )
 
         if weight is not None and not torch.is_tensor(weight):
             raise TypeError(f"weight must be a torch.Tensor or None, got {type(weight)!r}")
 
         self.reduction: Literal["none", "mean", "sum"] = reduction
+        self.spectral_reduction: Literal["auto", "mean", "sum"] = spectral_reduction
 
         self.register_buffer("weight", weight if weight is not None else None)
 
     def extra_repr(self) -> str:
         if self.weight is None:
-            return f"reduction={self.reduction!r}"
-        return f"reduction={self.reduction!r}, weight_shape={tuple(self.weight.shape)}, weight_dtype={self.weight.dtype}"
+            return f"reduction={self.reduction!r}, spectral_reduction={self.spectral_reduction!r}"
+        return (
+            f"reduction={self.reduction!r}, spectral_reduction={self.spectral_reduction!r}, "
+            f"weight_shape={tuple(self.weight.shape)}, weight_dtype={self.weight.dtype}"
+        )
 
     def forward(
         self,
@@ -83,4 +98,5 @@ class SpectralMSELoss(nn.Module):
             target_indices=target_indices,
             prefer_2stage=None,
             reduction=self.reduction,
+            spectral_reduction=self.spectral_reduction,
         )

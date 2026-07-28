@@ -45,8 +45,8 @@ def d_bucket(D) -> int:
     )
 
 
-def _maybe_int32(x: torch.Tensor) -> torch.Tensor:
-    return x if x.dtype == torch.int32 else x.to(torch.int32)
+def _maybe_int64(x: torch.Tensor) -> torch.Tensor:
+    return x if x.dtype == torch.int64 else x.to(torch.int64)
 
 
 def _should_use_2stage(N: int, D: int, device, BLOCK_D: int = 512) -> bool:
@@ -414,8 +414,8 @@ class _WeightedSqdiffSumIndexedFn(torch.autograd.Function):
         input_c = input.contiguous()
         other_c = other.contiguous()
         weight_c = weight.to(device=input.device, dtype=torch.float32).contiguous().reshape(-1)
-        input_indices_c = _maybe_int32(input_indices).contiguous()
-        other_indices_c = _maybe_int32(other_indices).contiguous()
+        input_indices_c = _maybe_int64(input_indices).contiguous()
+        other_indices_c = _maybe_int64(other_indices).contiguous()
 
         ctx.weight_shape = tuple(weight.shape)
         ctx.weight_dtype = weight.dtype
@@ -590,8 +590,8 @@ def weighted_sqdiff_sum_indexed_complex(
     input = input.contiguous()
     other = other.contiguous()
     weight = weight.to(device=input.device, dtype=torch.float32).contiguous().reshape(-1)
-    input_indices = _maybe_int32(input_indices).contiguous()
-    other_indices = _maybe_int32(other_indices).contiguous()
+    input_indices = _maybe_int64(input_indices).contiguous()
+    other_indices = _maybe_int64(other_indices).contiguous()
     if out is None:
         out = torch.empty((N,), device=input.device, dtype=torch.float32)
 

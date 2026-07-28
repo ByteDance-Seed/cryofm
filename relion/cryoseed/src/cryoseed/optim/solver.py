@@ -1,6 +1,7 @@
-import torch
 from dataclasses import dataclass
 from typing import Optional
+
+import torch
 
 from cryoseed.data import DataBatch
 

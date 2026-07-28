@@ -7,12 +7,17 @@ __all__ = [
     "BackendName",
     "backend_status",
     "spectral_mse_loss",
+    "spectral_cosine_similarity",
 ]
 
 _EXPORTS: dict[str, tuple[str, str]] = {
     "BackendName": ("spectral_mse_loss", "BackendName"),
     "backend_status": ("spectral_mse_loss", "backend_status"),
     "spectral_mse_loss": ("spectral_mse_loss", "spectral_mse_loss"),
+    "spectral_cosine_similarity": (
+        "spectral_cosine_similarity",
+        "spectral_cosine_similarity",
+    ),
 }
 
 

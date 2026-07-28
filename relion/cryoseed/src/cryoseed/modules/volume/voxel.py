@@ -44,20 +44,16 @@ class VoxelGrid(Volume):
         device: torch.device | str | None = None,
         device_mesh: Any | None = None,
         *,
-        requires_accum: bool | None = None,
-        requires_grad: bool | None = None,
+        requires_accum: bool = True,
+        requires_grad: bool = False,
     ) -> VoxelGrid:
-        if requires_accum is None:
-            requires_accum = bool(config.reconstruction.requires_accum)
-        if requires_grad is None:
-            requires_grad = bool(config.reconstruction.requires_grad)
         return cls(
             grid_size=int(config.data.image_size),
             num_volumes=int(config.reconstruction.num_volumes),
             device=device,
             device_mesh=device_mesh,
-            requires_accum=bool(requires_accum),
-            requires_grad=bool(requires_grad),
+            requires_accum=requires_accum,
+            requires_grad=requires_grad,
             backproject_chunk=int(config.reconstruction.backproject_chunk),
         )
 
@@ -93,8 +89,8 @@ class VoxelGrid(Volume):
         dev = _norm_device(device)
         self.register_buffer("_device_anchor", torch.empty(0, device=dev), persistent=False)
         self.device_mesh = device_mesh
-        self.requires_accum = requires_accum
-        self.requires_grad = requires_grad
+        self.requires_accum = bool(requires_accum)
+        self.requires_grad = bool(requires_grad)
         self.backproject_chunk = backproject_chunk
 
         self.volume = nn.Parameter(
@@ -132,6 +128,12 @@ class VoxelGrid(Volume):
         """Device that backs module parameters and buffers."""
         return self._device_anchor.device
 
+    def requires_grad_(self, requires_grad: bool = True) -> VoxelGrid:
+        """Set autograd participation for the volume Parameter."""
+        self.requires_grad = bool(requires_grad)
+        self.volume.requires_grad_(self.requires_grad)
+        return self
+
     @property
     def volume_real(self) -> Tensor:
         """Return the real part of the volume."""
@@ -153,6 +155,38 @@ class VoxelGrid(Volume):
                 dist.all_reduce(out, op=dist.ReduceOp.SUM, group=group)
 
         return out
+
+    @torch.no_grad()
+    def sync_grad_(self) -> None:
+        """Synchronize parameter gradients across the data-parallel group.
+
+        Gradients are summed across ``device_mesh.get_group(0)`` when available
+        (otherwise WORLD) and averaged in place so each replica steps with the
+        same effective gradient.
+        """
+        dist = getattr(torch, "distributed", None)
+        if dist is None or (not dist.is_available()) or (not dist.is_initialized()):
+            return
+
+        if self.device_mesh is not None:
+            group = (
+                self.device_mesh.get_group(0)
+                if hasattr(self.device_mesh, "get_group")
+                else self.device_mesh
+            )
+        else:
+            group = dist.group.WORLD
+
+        data_parallel_size = dist.get_world_size(group=group)
+        if data_parallel_size <= 1:
+            return
+
+        for param in self.parameters():
+            grad = param.grad
+            if grad is None:
+                continue
+            dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=group)
+            grad.div_(data_parallel_size)
 
     @property
     def accumulated_data(self) -> Tensor:
@@ -222,6 +256,40 @@ class VoxelGrid(Volume):
             self.accum_denom = None
 
         self.downsampled_volumes.clear()
+        self.volume_version += 1
+
+    @torch.no_grad()
+    def copy_volume_(self, volume: Tensor) -> None:
+        """Copy a Fourier volume into the existing parameter in place.
+
+        This keeps the current ``nn.Parameter`` object alive, so
+        ``requires_grad``, any existing ``.grad`` tensor, and optimizer state
+        attached to that parameter object are preserved. Accumulation buffers
+        also remain intact, while cached downsampled views are invalidated.
+        """
+        if volume.shape != self.volume.shape:
+            raise ValueError(
+                f"volume shape {tuple(volume.shape)} does not match "
+                f"reference shape {tuple(self.volume.shape)}"
+            )
+        self.volume.copy_(
+            volume.detach().to(device=self.volume.device, dtype=self.volume.dtype)
+        )
+        self.downsampled_volumes.clear()
+        self.volume_version += 1
+
+    def _build_downsampled_volume(self, side_length: int) -> Tensor:
+        downsampled_volume = downsample3d(self.volume, side_length)
+        center = side_length // 2
+        mask = spherical_mask(
+            side_length,
+            side_length,
+            side_length,
+            center=(center, center, center),
+            radius=side_length / 2,
+            device=downsampled_volume.device,
+        )
+        return downsampled_volume.masked_fill(~mask, 0.0)
 
     def get_downsampled_volumes(self, side_length: int) -> Tensor:
         """Return a cached Fourier volume cropped/downsampled to ``side_length``.
@@ -236,23 +304,15 @@ class VoxelGrid(Volume):
             Complex tensor with shape ``(K, L, L, L)``.
         """
         if side_length not in self.downsampled_volumes:
-            downsampled_volume = downsample3d(self.volume, side_length)
-            center = side_length // 2
-            mask = spherical_mask(
-                side_length,
-                side_length,
-                side_length,
-                center=(center, center, center),
-                radius=side_length / 2,
-                device=downsampled_volume.device,
-            )
-            self.downsampled_volumes[side_length] = downsampled_volume.masked_fill(~mask, 0.0)
+            self.downsampled_volumes[side_length] = self._build_downsampled_volume(side_length)
         return self.downsampled_volumes[side_length]
 
     def _project(
         self,
         rotation: Tensor,
         side_length: int | None = None,
+        *,
+        use_cache: bool = True,
     ) -> Tensor:
         """Project the 3D Fourier volume onto the z=0 central slice.
 
@@ -263,6 +323,9 @@ class VoxelGrid(Volume):
                 detector (projection) frame.
             side_length: Output side length ``L``. If ``L < grid_size``, the stored
                 Fourier volume is cropped/downsampled before projection.
+            use_cache: Whether downsampled Fourier volumes may be reused from the
+                internal cache. Differentiable callers should disable this so each
+                invocation builds its own autograd graph.
 
         Returns:
             Complex tensor with shape ``(K, Q, L, L)``.
@@ -285,7 +348,10 @@ class VoxelGrid(Volume):
             )
 
         if side_length < self.grid_size:
-            volume_cplx = self.get_downsampled_volumes(side_length)
+            if use_cache:
+                volume_cplx = self.get_downsampled_volumes(side_length)
+            else:
+                volume_cplx = self._build_downsampled_volume(side_length)
         else:
             volume_cplx = self.volume
 
@@ -319,6 +385,7 @@ class VoxelGrid(Volume):
         return self._project(
             rotation,
             side_length=side_length,
+            use_cache=True,
         )
     
     @torch.no_grad()
@@ -484,6 +551,7 @@ class VoxelGrid(Volume):
             group (``device_mesh.get_group(0)`` when available, otherwise WORLD).
             The reduction is performed into temporary clones so in-module buffers
             are left unchanged.
+
         """
         if (not self.requires_accum) or self.accum_numer is None or self.accum_denom is None:
             return
@@ -535,7 +603,8 @@ class VoxelGrid(Volume):
 
         Args:
             set_to_none: If ``True``, set accumulator buffers to ``None``.
-                Otherwise, allocate (if needed) and zero them.
+                Otherwise, when ``requires_accum=True``, allocate (if needed)
+                and zero them.
         """
         if set_to_none:
             self.accum_numer = None
@@ -553,17 +622,20 @@ class VoxelGrid(Volume):
         self.accum_numer.zero_()
         self.accum_denom.zero_()
 
-    def forward(self, rotation: Tensor) -> Tensor:
+    def forward(self, rotation: Tensor, side_length: int | None = None) -> Tensor:
         """Differentiable projection path for module-style invocation.
 
         Unlike :meth:`project`, this method does not run under ``torch.no_grad()``.
         It calls the shared :meth:`_project` implementation with
-        ``side_length=grid_size`` so gradients can flow back to ``self.volume``.
+        ``use_cache=False`` so gradients can flow back to ``self.volume`` without
+        reusing stale cached downsampled volumes.
 
         Args:
             rotation: Rotation matrices with shape ``(K, Q, 3, 3)``.
+            side_length: Output side length ``L``. If omitted, uses
+                ``grid_size``.
 
         Returns:
-            Complex tensor with shape ``(K, Q, grid_size, grid_size)``.
+            Complex tensor with shape ``(K, Q, L, L)``.
         """
-        return self._project(rotation)
+        return self._project(rotation, side_length=side_length, use_cache=False)

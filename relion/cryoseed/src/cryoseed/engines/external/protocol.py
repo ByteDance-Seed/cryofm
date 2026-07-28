@@ -10,7 +10,13 @@ from cryoseed.engines.external.manager import ExternalReconstructJob
 
 @dataclass(frozen=True)
 class ExternalReconstructLayout:
-    """Filesystem layout for one external reconstruction job."""
+    """Filesystem layout for one external reconstruction job.
+
+    The ``result`` path is part of the primary handoff back to the main
+    process. The external tool may overwrite it, but a clean command exit with
+    the original result left untouched is still an acceptable identity-style
+    outcome. ``result_star`` is optional auxiliary output.
+    """
 
     work_dir: str
     data_real: str
@@ -98,7 +104,13 @@ def build_external_reconstruct_job(
     name: str,
     layout: ExternalReconstructLayout,
 ) -> ExternalReconstructJob:
-    """Convert one external reconstruction request layout into a manager job."""
+    """Convert one external reconstruction request layout into a manager job.
+
+    The manager treats this job as successful when the external command exits
+    cleanly. It does not require proof that the command produced a modified
+    reconstruction, because some tools may legitimately behave like an
+    identity transform and leave ``layout.result`` unchanged.
+    """
     return ExternalReconstructJob(
         name=name,
         work_dir=layout.work_dir,

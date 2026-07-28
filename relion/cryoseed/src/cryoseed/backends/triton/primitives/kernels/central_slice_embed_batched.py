@@ -18,7 +18,10 @@ __all__ = ["central_slice_embed_batched_kernel"]
     # same initial state without zeroing or double-accumulating the volume.
     restore_value=["out_numer_cplx_ptr", "out_denom_ptr"],
 )
-@triton.jit
+# Keep B/K as runtime scalars. Triton may otherwise specialize them into
+# constexpr/meta parameters even though this kernel only uses them for runtime
+# indexing and bounds checks.
+@triton.jit(do_not_specialize=["B", "K"])
 def central_slice_embed_batched_kernel(
     input_cplx_ptr,
     modulation_ptr,

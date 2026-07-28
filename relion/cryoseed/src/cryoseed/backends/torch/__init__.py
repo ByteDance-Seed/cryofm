@@ -6,13 +6,20 @@ from typing import Any
 __all__ = [
     "backproject",
     "project",
+    "radial_residual_power",
     "spectral_mse_loss",
+    "spectral_cosine_similarity",
 ]
 
 _EXPORTS: dict[str, tuple[str, str]] = {
     "backproject": ("backproject", "backproject"),
     "project": ("project", "project"),
+    "radial_residual_power": ("radial_residual_power", "radial_residual_power"),
     "spectral_mse_loss": ("spectral_mse_loss", "spectral_mse_loss"),
+    "spectral_cosine_similarity": (
+        "spectral_cosine_similarity",
+        "spectral_cosine_similarity",
+    ),
 }
 
 

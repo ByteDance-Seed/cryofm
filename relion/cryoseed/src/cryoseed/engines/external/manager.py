@@ -51,7 +51,17 @@ class ExternalReconstructResult:
 
 
 class ExternalReconstructManager:
-    """Coordinate external reconstruction jobs across distributed ranks."""
+    """Coordinate external reconstruction jobs across distributed ranks.
+
+    This manager is intentionally a command runner plus distributed status
+    synchronizer. A job is considered successful when the external command
+    exits cleanly and the result remains readable by the main process.
+
+    In particular, this layer does not require the external program to prove
+    that it produced a semantically updated reconstruction. Returning ``0`` and
+    leaving the prewritten result untouched is treated as an acceptable
+    identity-style outcome.
+    """
 
     def __init__(
         self,
@@ -75,7 +85,14 @@ class ExternalReconstructManager:
         *,
         run_id: str,
     ) -> list[ExternalReconstructResult]:
-        """Run a batch of jobs and return one result per job."""
+        """Run a batch of jobs and return one result per job.
+
+        Success here means that rank0 launched the command(s), observed clean
+        process exit, and propagated that command-level success to other ranks.
+        It does not imply that the external tool must have produced a changed
+        output volume; an identity outcome is still acceptable as long as the
+        downstream result path remains readable.
+        """
         normalized_jobs = [job.normalized() for job in jobs]
         self._validate_jobs(normalized_jobs)
 
@@ -139,6 +156,12 @@ class ExternalReconstructManager:
         *,
         run_id: str,
     ) -> list[ExternalReconstructResult]:
+        """Launch and wait for all jobs on rank0.
+
+        This method validates command-level success only. The external program
+        may legally behave like an identity transform and keep the prewritten
+        result unchanged, so long as it exits successfully.
+        """
         processes: list[tuple[ExternalReconstructJob, subprocess.Popen]] = []
         try:
             processes = [(job, self._launch(job)) for job in jobs]

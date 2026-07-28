@@ -1,25 +1,35 @@
 """Mask utilities used in cryo-EM preprocessing.
 
-This module provides small helpers to build circular / spherical masks in NumPy
-or PyTorch, and a RELION-style soft mask for batched tensors.
+This module groups together NumPy and torch geometry masks, soft-mask
+application helpers, and Fourier-space masking utilities.
 """
 
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
+from pathlib import Path
 
+import mrcfile
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 
-_all__ = [
+__all__ = [
     "circular_mask_numpy",
     "spherical_mask_numpy",
     "circular_mask",
     "spherical_mask",
-    "soft_mask_background",
-    "lowpass_filter",
+    "radial_mask",
+    "masked_lerp",
+    "particle_mask",
+    "center_fit_mask",
+    "load_mask_mrc",
+    "lowpass_mask",
 ]
+
+# NumPy Geometry Masks
 
 def circular_mask_numpy(
     h: int,
@@ -86,53 +96,103 @@ def spherical_mask_numpy(
     return dist_from_center <= radius
 
 
+# Torch Geometry Masks
+
 def circular_mask(
-    h, w, center=None, radius=None, device=None, dtype=torch.float32
-) -> torch.Tensor:
+    h: int,
+    w: int,
+    center: Sequence[float] | None = None,
+    radius: float | None = None,
+    soft_edge_pixels: float = 0.0,
+    device: torch.device | str | None = None,
+    dtype: torch.dtype = torch.float32,
+) -> Tensor:
     """Create a 2D circular mask.
  
     Args:
         h, w: Image size in (H, W) order.
         center: Circle center in (x, y) index order. Defaults to the image center.
         radius: Radius in pixels. Defaults to the largest radius that stays in-bounds.
+        soft_edge_pixels: Width of the soft edge in pixels. A value of 0
+            returns a hard boolean mask.
         device: Device for the returned mask. Defaults to CPU.
         dtype: Dtype for intermediate coordinate computation.
  
     Returns:
-        A boolean torch.Tensor of shape (H, W).
+        A boolean torch.Tensor of shape (H, W) when ``soft_edge_pixels == 0``.
+        Otherwise returns a float mask with values in ``[0, 1]``.
     """
+    if not torch.empty((), dtype=dtype).is_floating_point():
+        raise TypeError(f"dtype must be floating point, got {dtype}")
     if center is None:
         center = (int(w / 2), int(h / 2))
+    else:
+        center = (float(center[0]), float(center[1]))
     if radius is None:
         radius = min(center[0], center[1], w - center[0], h - center[1])
+    radius = float(radius)
+    soft_edge_pixels = float(soft_edge_pixels)
+    if radius < 0:
+        raise ValueError(f"radius must be non-negative, got {radius}")
+    if soft_edge_pixels < 0:
+        raise ValueError(
+            f"soft_edge_pixels must be non-negative, got {soft_edge_pixels}"
+        )
 
     y = torch.arange(h, device=device, dtype=dtype).view(h, 1)
     x = torch.arange(w, device=device, dtype=dtype).view(1, w)
 
     cx, cy = float(center[0]), float(center[1])
-    r2 = float(radius) * float(radius)
+    distance = torch.sqrt((x - cx) ** 2 + (y - cy) ** 2)
+    if soft_edge_pixels == 0:
+        return distance <= radius
 
-    dist2 = (x - cx) ** 2 + (y - cy) ** 2
-    return dist2 <= r2
+    outer_radius = radius + soft_edge_pixels
+    transition = 0.5 - 0.5 * torch.cos(
+        math.pi * (outer_radius - distance) / soft_edge_pixels
+    )
+    return torch.where(
+        distance <= radius,
+        torch.ones_like(distance),
+        torch.where(
+            distance >= outer_radius,
+            torch.zeros_like(distance),
+            transition,
+        ),
+    )
 
 
 def spherical_mask(
-    d, h, w, center=None, radius=None, device=None, dtype=torch.float32
-) -> torch.Tensor:
+    d: int,
+    h: int,
+    w: int,
+    center: Sequence[float] | None = None,
+    radius: float | None = None,
+    soft_edge_pixels: float = 0.0,
+    device: torch.device | str | None = None,
+    dtype: torch.dtype = torch.float32,
+) -> Tensor:
     """Create a 3D spherical mask.
  
     Args:
         d, h, w: Volume size in (D, H, W) order.
         center: Sphere center in (x, y, z) index order. Defaults to the volume center.
         radius: Radius in pixels/voxels. Defaults to the largest radius that stays in-bounds.
+        soft_edge_pixels: Width of the soft edge in voxels. A value of 0
+            returns a hard boolean mask.
         device: Device for the returned mask. Defaults to CPU.
         dtype: Dtype for intermediate coordinate computation.
  
     Returns:
-        A boolean torch.Tensor of shape (D, H, W).
+        A boolean torch.Tensor of shape (D, H, W) when ``soft_edge_pixels == 0``.
+        Otherwise returns a float mask with values in ``[0, 1]``.
     """
+    if not torch.empty((), dtype=dtype).is_floating_point():
+        raise TypeError(f"dtype must be floating point, got {dtype}")
     if center is None:
         center = (int(w / 2), int(h / 2), int(d / 2))
+    else:
+        center = (float(center[0]), float(center[1]), float(center[2]))
     if radius is None:
         radius = min(
             center[0],
@@ -142,159 +202,274 @@ def spherical_mask(
             h - center[1],
             d - center[2],
         )
+    radius = float(radius)
+    soft_edge_pixels = float(soft_edge_pixels)
+    if radius < 0:
+        raise ValueError(f"radius must be non-negative, got {radius}")
+    if soft_edge_pixels < 0:
+        raise ValueError(
+            f"soft_edge_pixels must be non-negative, got {soft_edge_pixels}"
+        )
 
     z = torch.arange(d, device=device, dtype=dtype).view(d, 1, 1)
     y = torch.arange(h, device=device, dtype=dtype).view(1, h, 1)
     x = torch.arange(w, device=device, dtype=dtype).view(1, 1, w)
 
     x0, y0, z0 = float(center[0]), float(center[1]), float(center[2])
-    r2 = float(radius) * float(radius)
+    distance = torch.sqrt((x - x0) ** 2 + (y - y0) ** 2 + (z - z0) ** 2)
+    if soft_edge_pixels == 0:
+        return distance <= radius
 
-    dist2 = (x - x0) ** 2 + (y - y0) ** 2 + (z - z0) ** 2
-    return dist2 <= r2
+    outer_radius = radius + soft_edge_pixels
+    transition = 0.5 - 0.5 * torch.cos(
+        math.pi * (outer_radius - distance) / soft_edge_pixels
+    )
+    return torch.where(
+        distance <= radius,
+        torch.ones_like(distance),
+        torch.where(
+            distance >= outer_radius,
+            torch.zeros_like(distance),
+            transition,
+        ),
+    )
 
 
-def soft_mask_background(
-    vol: Tensor,
-    radius: float,
-    cosine_width: float = 5.0,
-    noise: Tensor | None = None,
+def radial_mask(
+    shape: Sequence[int],
+    *,
+    radius: float | None = None,
+    center: Sequence[float] | None = None,
+    soft_edge_pixels: float = 0.0,
+    device: torch.device | str | None = None,
+    dtype: torch.dtype = torch.float32,
 ) -> Tensor:
-    """Apply a RELION-style soft mask outside a radius.
+    """Dispatch to the 2D or 3D torch radial mask implementation."""
+    shape = tuple(int(size) for size in shape)
+    if len(shape) == 2:
+        return circular_mask(
+            shape[0],
+            shape[1],
+            center=center,
+            radius=radius,
+            soft_edge_pixels=soft_edge_pixels,
+            device=device,
+            dtype=dtype,
+        )
+    if len(shape) == 3:
+        return spherical_mask(
+            shape[0],
+            shape[1],
+            shape[2],
+            center=center,
+            radius=radius,
+            soft_edge_pixels=soft_edge_pixels,
+            device=device,
+            dtype=dtype,
+        )
+    raise ValueError(f"shape must be 2D or 3D, got {shape}")
 
-    Values outside ``radius + cosine_width`` are replaced by background. Values
-    in the transition band are blended using a raised cosine.
+
+# Mask Application Helpers
+
+def center_fit_mask(volume: Tensor, side_length: int) -> Tensor:
+    """Center-crop or zero-pad a cubic 3D mask to ``side_length`` voxels."""
+    side_length = int(side_length)
+    if side_length <= 0:
+        raise ValueError(f"side_length must be positive, got {side_length}")
+    if volume.ndim != 3 or not (volume.shape[0] == volume.shape[1] == volume.shape[2]):
+        raise ValueError(
+            f"volume must be a cubic 3D tensor, got shape={tuple(volume.shape)}"
+        )
+
+    source_size = int(volume.shape[-1])
+    if source_size == side_length:
+        return volume
+    if source_size > side_length:
+        start = (source_size - side_length) // 2
+        end = start + side_length
+        return volume[start:end, start:end, start:end]
+
+    output = volume.new_zeros((side_length, side_length, side_length))
+    start = (side_length - source_size) // 2
+    end = start + source_size
+    output[start:end, start:end, start:end] = volume
+    return output
+
+
+def load_mask_mrc(
+    path: str | Path,
+    *,
+    side_length: int,
+    angpix: float,
+    device: torch.device | str | None = None,
+    dtype: torch.dtype = torch.float32,
+) -> Tensor:
+    """Load a solvent mask from MRC and align it to the current grid."""
+    side_length = int(side_length)
+    angpix = float(angpix)
+    if side_length <= 0:
+        raise ValueError(f"side_length must be positive, got {side_length}")
+    if angpix <= 0:
+        raise ValueError(f"angpix must be positive, got {angpix}")
+    if not torch.empty((), dtype=dtype).is_floating_point():
+        raise TypeError(f"dtype must be floating point, got {dtype}")
+
+    path = Path(path)
+    if not path.name:
+        raise ValueError("a solvent-mask MRC path is required")
+    if not path.is_file():
+        raise FileNotFoundError(path)
+
+    with mrcfile.open(path, permissive=True) as mrc:
+        data = torch.as_tensor(mrc.data.copy(), dtype=dtype)
+        mask_angpix = float(mrc.voxel_size.x)
+
+    if data.ndim != 3 or not (data.shape[0] == data.shape[1] == data.shape[2]):
+        raise ValueError(
+            f"solvent mask must be a cubic 3D volume, got {tuple(data.shape)}"
+        )
+    if not torch.isfinite(data).all():
+        raise ValueError("solvent mask contains non-finite values")
+
+    if mask_angpix > 0 and abs(mask_angpix - angpix) > 1e-3:
+        rescaled_size = max(
+            1,
+            int(round(int(data.shape[-1]) * mask_angpix / angpix)),
+        )
+        data = F.interpolate(
+            data[None, None],
+            size=(rescaled_size, rescaled_size, rescaled_size),
+            mode="trilinear",
+            align_corners=False,
+        )[0, 0]
+
+    data = center_fit_mask(data, side_length)
+    return data.clamp(0.0, 1.0).to(device=device, dtype=dtype)
+
+
+def masked_lerp(input: Tensor, mask: Tensor, other: Tensor | float = 0) -> Tensor:
+
+    """Blend ``other`` and ``input`` using a broadcastable soft mask.
 
     Args:
-        vol: Batched tensor of shape (B, D, H, W) or (B, H, W).
-        radius: Inner radius in pixels/voxels.
-        cosine_width: Width of the raised-cosine transition band.
-        noise: Optional background tensor with the same shape as ``vol``. If not
-            provided, the background is estimated from the outer region.
+        input: Input tensor that should be kept where the mask is near ``1``.
+        other: Background tensor or scalar blended in where the mask is near ``0``.
 
     Returns:
-        Masked tensor with the same shape and dtype as ``vol``.
+        A tensor with the same shape and dtype as ``input``.
     """
-    device = vol.device
-    dtype = vol.dtype
-
-    if radius < 0:
-        raise ValueError(f"radius must be >= 0, got {radius}")
-    if cosine_width <= 0:
-        raise ValueError(f"cosine_width must be > 0, got {cosine_width}")
-    if noise is not None and noise.shape != vol.shape:
-        raise ValueError(f"noise must have the same shape as vol, got {noise.shape} vs {vol.shape}")
-
-    # Determine spatial dimensions
-    if vol.dim() == 4:  # Batched 3D: (batch_size, D, H, W)
-        batch_size = vol.shape[0]
-        spatial_dims = vol.shape[1:]
-        is_3d = True
-    elif vol.dim() == 3:  # Batched 2D: (batch_size, H, W)
-        batch_size = vol.shape[0]
-        spatial_dims = vol.shape[1:]
-        is_3d = False
+    mask = mask.to(device=input.device, dtype=input.real.dtype)
+    if not torch.is_tensor(other):
+        other = input.new_tensor(other)
     else:
+        other = other.to(device=input.device, dtype=input.dtype)
+    return torch.lerp(other, input, mask)
+
+
+def particle_mask(
+    h: int,
+    w: int,
+    *,
+    particle_diameter: float,
+    angpix: float,
+    center: Sequence[float] | Tensor | None = None,
+    soft_edge_pixels: float = 5.0,
+    device: torch.device | str | None = None,
+    dtype: torch.dtype = torch.float32,
+) -> Tensor:
+    """Create a 2D soft particle mask in real space.
+
+    Args:
+        h: Image height.
+        w: Image width.
+        particle_diameter: Particle diameter in physical units.
+        angpix: Pixel size in the same physical units as ``particle_diameter``.
+        center: Particle center in ``(x, y)`` index order. Accepts either a
+            single center of shape ``(2,)`` or batched centers of shape ``(B, 2)``.
+            Defaults to the image center.
+        soft_edge_pixels: Width of the raised-cosine soft edge in pixels.
+        device: Device for the returned mask. Defaults to CPU.
+        dtype: Floating-point dtype used to build the mask.
+
+    Returns:
+        A float mask of shape ``(H, W)`` for a single center, or ``(B, H, W)``
+        for batched centers, with values in ``[0, 1]``.
+    """
+    h = int(h)
+    w = int(w)
+    if h != w:
         raise ValueError(
-            "Volume must be batched: (batch_size, D, H, W) or (batch_size, H, W)"
+            f"particle_mask expects square particles, got ({h}, {w})"
+        )
+    particle_diameter = float(particle_diameter)
+    angpix = float(angpix)
+    soft_edge_pixels = float(soft_edge_pixels)
+    if particle_diameter <= 0:
+        raise ValueError(
+            f"particle_diameter must be positive, got {particle_diameter}"
+        )
+    if angpix <= 0:
+        raise ValueError(f"angpix must be positive, got {angpix}")
+    if soft_edge_pixels <= 0:
+        raise ValueError(
+            f"soft_edge_pixels must be positive, got {soft_edge_pixels}"
         )
 
-    radius_p = radius + cosine_width
+    if torch.is_tensor(center):
+        if center.ndim != 2 or center.shape[-1] != 2:
+            raise ValueError(
+                f"batched center must have shape (B, 2), got {tuple(center.shape)}"
+            )
 
-    # Create coordinate grids for spatial dimensions
-    if is_3d:  # 3D spatial dimensions
-        d_coords = (
-            torch.arange(spatial_dims[0], device=device, dtype=dtype)
-            - spatial_dims[0] // 2
+        center = center.to(device=device, dtype=dtype)
+        y = torch.arange(h, device=device, dtype=dtype).view(1, h, 1)
+        x = torch.arange(w, device=device, dtype=dtype).view(1, 1, w)
+        cx = center[:, 0].view(-1, 1, 1)
+        cy = center[:, 1].view(-1, 1, 1)
+        distance = torch.sqrt((x - cx) ** 2 + (y - cy) ** 2)
+        radius = particle_diameter / (2.0 * angpix)
+        outer_radius = radius + soft_edge_pixels
+        transition = 0.5 - 0.5 * torch.cos(
+            math.pi * (outer_radius - distance) / soft_edge_pixels
         )
-        h_coords = (
-            torch.arange(spatial_dims[1], device=device, dtype=dtype)
-            - spatial_dims[1] // 2
-        )
-        w_coords = (
-            torch.arange(spatial_dims[2], device=device, dtype=dtype)
-            - spatial_dims[2] // 2
-        )
-
-        d_grid, h_grid, w_grid = torch.meshgrid(
-            d_coords, h_coords, w_coords, indexing="ij"
-        )
-        r = torch.sqrt(d_grid**2 + h_grid**2 + w_grid**2)
-
-    else:  # 2D spatial dimensions
-        h_coords = (
-            torch.arange(spatial_dims[0], device=device, dtype=dtype)
-            - spatial_dims[0] // 2
-        )
-        w_coords = (
-            torch.arange(spatial_dims[1], device=device, dtype=dtype)
-            - spatial_dims[1] // 2
+        return torch.where(
+            distance <= radius,
+            torch.ones_like(distance),
+            torch.where(
+                distance >= outer_radius,
+                torch.zeros_like(distance),
+                transition,
+            ),
         )
 
-        h_grid, w_grid = torch.meshgrid(h_coords, w_coords, indexing="ij")
-        r = torch.sqrt(h_grid**2 + w_grid**2)
+    return circular_mask(
+        h,
+        w,
+        center=center,
+        radius=particle_diameter / (2.0 * angpix),
+        soft_edge_pixels=soft_edge_pixels,
+        device=device,
+        dtype=dtype,
+    )
 
-    # Expand r to match batch dimension
-    r = r.unsqueeze(0).expand(batch_size, *r.shape)
 
-    # Create masks for different regions
-    outer_mask = r > radius_p
-    transition_mask = (r >= radius) & (r <= radius_p)
-
-    # Calculate background value if noise is not provided
-    if noise is None:
-        # Calculate weighted average of background values for each item in batch
-        transition_weights = torch.where(
-            transition_mask,
-            0.5 + 0.5 * torch.cos(math.pi * (radius_p - r) / cosine_width),
-            0.0,
-        )
-
-        outer_weights = outer_mask.float()
-
-        # Sum over spatial dimensions, keep batch dim
-        spatial_dims_to_sum = list(range(1, vol.dim()))
-        total_weights = outer_weights + transition_weights
-        weighted_sum = (vol * outer_weights + vol * transition_weights).sum(
-            dim=spatial_dims_to_sum, keepdim=True
-        )
-        weight_sum = total_weights.sum(dim=spatial_dims_to_sum, keepdim=True)
-
-        # Avoid division by zero
-        weight_sum = torch.clamp(weight_sum, min=1e-8)
-        sum_bg = weighted_sum / weight_sum
-
-        # Expand to full volume shape
-        background = sum_bg.expand_as(vol)
-    else:
-        background = noise
-
-    # Apply the mask
-    result = vol.clone()
-
-    # Outer region: replace with background
-    result = torch.where(outer_mask, background, result)
-
-    # Transition region: blend with raised cosine
-    raisedcos = 0.5 + 0.5 * torch.cos(math.pi * (radius_p - r) / cosine_width)
-    blended = (1 - raisedcos) * vol + raisedcos * background
-    result = torch.where(transition_mask, blended, result)
-
-    return result
+# Fourier-Space Masks
 
 def lowpass_mask(x: Tensor, side_length: int, ndim: int) -> Tensor:
-    """Build a centered low-pass mask in the Fourier domain.
+    """Create a centered low-pass mask in the Fourier domain.
 
-    This helper mirrors the behavior of the legacy implementation that crops a
-    centered (L, L) or (L, L, L) window in frequency space.
+    The mask keeps a centered ``(L, L)`` or ``(L, L, L)`` window in
+    frequency space.
 
     Args:
-        x: Input tensor. The mask is created with the same shape as ``x``.
-        side_length: Side length ``L`` of the kept central frequency window.
-        ndim: Spatial dimensionality (2 or 3).
+        x: Reference tensor. The returned mask matches ``x`` in shape, device,
+            and dtype.
+        side_length: Side length ``L`` of the retained central frequency window.
+        ndim: Spatial dimensionality of the mask. Must be ``2`` or ``3``.
 
     Returns:
-        A tensor mask with the same shape as ``x``.
+        A tensor mask with the same shape and dtype as ``x``.
     """
     L = int(side_length)
     D = int(x.shape[-1])

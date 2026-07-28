@@ -22,13 +22,13 @@ class DataBatch:
             Particle images in real space, shape ``(B, D, D)``.
         particle_index (torch.Tensor):
             Dataset-level particle indices, shape ``(B,)``.
+        stack_index (torch.Tensor):
+            Per-particle index within the source MRC/MRCS stack, shape ``(B,)``.
         ctf_params (torch.Tensor | None):
             Per-particle CTF parameters, shape ``(B, C)``, or ``None``.
             The convention of the last dimension is defined by the data pipeline.
         ctf (torch.Tensor | None):
             Optional precomputed CTF in Fourier space, shape ``(B, D, D)``.
-        stack_index (torch.Tensor | None):
-            Optional per-particle index within the source MRC/MRCS stack, shape ``(B,)``.
         euler (torch.Tensor | None):
             Optional Euler angles in radians, shape ``(B, 3)``.
         trans (torch.Tensor | None):
@@ -38,10 +38,9 @@ class DataBatch:
     image: torch.Tensor
     image_real: torch.Tensor
     particle_index: torch.Tensor
+    stack_index: torch.Tensor
     ctf_params: torch.Tensor | None = None
     ctf: torch.Tensor | None = None
-
-    stack_index: torch.Tensor | None = None
     euler: torch.Tensor | None = None
     trans: torch.Tensor | None = None
 
@@ -65,15 +64,13 @@ class DataBatch:
             image=self.image.to(device, non_blocking=non_blocking),
             image_real=self.image_real.to(device, non_blocking=non_blocking),
             particle_index=self.particle_index.to(device, non_blocking=non_blocking),
+            stack_index=self.stack_index.to(device, non_blocking=non_blocking),
             ctf_params=None
             if self.ctf_params is None
             else self.ctf_params.to(device, non_blocking=non_blocking),
             ctf=None
             if self.ctf is None
             else self.ctf.to(device, non_blocking=non_blocking),
-            stack_index=None
-            if self.stack_index is None
-            else self.stack_index.to(device, non_blocking=non_blocking),
             euler=None
             if self.euler is None
             else self.euler.to(device, non_blocking=non_blocking),
@@ -92,9 +89,9 @@ class DataBatch:
             image=self.image.pin_memory(),
             image_real=self.image_real.pin_memory(),
             particle_index=self.particle_index.pin_memory(),
+            stack_index=self.stack_index.pin_memory(),
             ctf_params=None if self.ctf_params is None else self.ctf_params.pin_memory(),
             ctf=None if self.ctf is None else self.ctf.pin_memory(),
-            stack_index=None if self.stack_index is None else self.stack_index.pin_memory(),
             euler=None if self.euler is None else self.euler.pin_memory(),
             trans=None if self.trans is None else self.trans.pin_memory(),
         )

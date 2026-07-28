@@ -10,6 +10,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "central_slice_sample": ("central_slice_sample", "central_slice_sample"),
     "central_slice_sample_ncdhw": ("central_slice_sample", "central_slice_sample_ncdhw"),
     "central_slice_sample_ndhwc": ("central_slice_sample", "central_slice_sample_ndhwc"),
+    "weighted_sqdiff_group_sum_indexed_complex": ("weighted_sqdiff_group_sum", "weighted_sqdiff_group_sum_indexed_complex"),
     "weighted_sqdiff_sum": ("weighted_sqdiff_sum", "weighted_sqdiff_sum"),
     "weighted_sqdiff_sum_indexed_complex": ("weighted_sqdiff_sum", "weighted_sqdiff_sum_indexed_complex"),
     "weighted_sqdiff_sum_broadcast_complex": ("weighted_sqdiff_sum", "weighted_sqdiff_sum_broadcast_complex"),

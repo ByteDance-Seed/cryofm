@@ -16,11 +16,15 @@ from cryoseed.fft.coords import fftindex_radial2d
 from cryoseed.modules.pose import Pose
 from cryoseed.modules.statistics.noise import NoiseVariance
 from cryoseed.modules.volume import Volume
-from cryoseed.ops.loss import spectral_mse_loss
+from cryoseed.ops.loss import (
+    spectral_cosine_similarity,
+    spectral_mse_loss,
+)
+from cryoseed.ops.radial import radial_residual_power
 from cryoseed.ops.transforms import downsample2d, translate_image
 from cryoseed.state import OptimState
 
-from . import shift_grid, so3_grid
+from . import PoseGeometry, shift_grid, so3_grid
 
 from .cache import MemoryProjCache, SSDProjCache
 
@@ -76,7 +80,7 @@ class HEALPixPoseSearcher(torch.nn.Module):
         cls,
         state: OptimState,
         volume: Volume,
-        pose: Pose,
+        pose: Pose | None,
         *,
         config: MainConfig,
         noise: NoiseVariance | None = None,
@@ -95,9 +99,10 @@ class HEALPixPoseSearcher(torch.nn.Module):
             trans_grid_y_shift=config.pose_search.trans_grid_y_shift,
             pose_chunk_factor=config.pose_search.pose_chunk_factor,
             max_candidates=config.pose_search.max_candidates,
-            mse_chunk=config.pose_search.mse_chunk,
+            criterion_chunk=config.pose_search.criterion_chunk,
             candidate_select_threshold=config.pose_search.candidate_select_threshold,
-            renormalize_sel_prob=config.pose_search.renormalize_sel_prob,
+            volume_class_similarity=config.pose_search.volume_class_similarity,
+            volume_class_similarity_scope=config.pose_search.volume_class_similarity_scope,
             oversampling_deduplicate=config.pose_search.oversampling_deduplicate,
             ring_averaged_mse=config.pose_search.ring_averaged_mse,
             ssd_cache_root=config.io.ssd_cache_root,
@@ -107,7 +112,7 @@ class HEALPixPoseSearcher(torch.nn.Module):
         self,
         state: OptimState,
         volume: Volume,
-        pose: Pose,
+        pose: Pose | None,
         *,
         noise: NoiseVariance | None = None,
         device: torch.device | str | None = None,
@@ -117,9 +122,10 @@ class HEALPixPoseSearcher(torch.nn.Module):
         trans_grid_y_shift: int = 0,
         pose_chunk_factor: int = 2560,
         max_candidates: int = -1,
-        mse_chunk: int = 8192,
+        criterion_chunk: int = 8192,
         candidate_select_threshold: float = 0.999,
-        renormalize_sel_prob: bool = True,
+        volume_class_similarity: float = 0.0,
+        volume_class_similarity_scope: str = "global",
         oversampling_deduplicate: bool = False,
         ring_averaged_mse: bool = False,
         ssd_cache_root: str | None = None,
@@ -139,22 +145,29 @@ class HEALPixPoseSearcher(torch.nn.Module):
         self.trans_grid_x_shift = trans_grid_x_shift
         self.trans_grid_y_shift = trans_grid_y_shift
         self.pose_chunk_factor = pose_chunk_factor
-        self.mse_chunk = mse_chunk
+        self.criterion_chunk = criterion_chunk
         self.candidate_select_threshold = candidate_select_threshold
-        self.renormalize_sel_prob = renormalize_sel_prob
+        self.volume_class_similarity = float(volume_class_similarity)
+        self.volume_class_similarity_scope = str(volume_class_similarity_scope)
         self.oversampling_deduplicate = bool(oversampling_deduplicate)
         self.ring_averaged_mse = bool(ring_averaged_mse)
         self.ssd_cache_root = ssd_cache_root
 
         if self.pose_chunk_factor is not None and self.pose_chunk_factor <= 0:
             raise ValueError("pose_chunk_factor must be positive or None")
-        if self.mse_chunk <= 0:
-            raise ValueError("mse_chunk must be > 0")
+        if self.criterion_chunk <= 0:
+            raise ValueError("criterion_chunk must be > 0")
         if max_candidates == 0 or max_candidates < -1:
             raise ValueError("max_candidates must be > 0, or -1 for unlimited")
         self.max_candidates = None if max_candidates == -1 else int(max_candidates)
         if not (0 < self.candidate_select_threshold <= 1):
             raise ValueError("candidate_select_threshold must be in (0, 1]")
+        if not (0.0 <= self.volume_class_similarity <= 1.0):
+            raise ValueError("volume_class_similarity must be in [0, 1]")
+        if self.volume_class_similarity_scope not in {"global", "all"}:
+            raise ValueError(
+                "volume_class_similarity_scope must be one of {'global', 'all'}"
+            )
 
 
         # placeholder
@@ -206,11 +219,16 @@ class HEALPixPoseSearcher(torch.nn.Module):
         self.current_trans_healpix_order = 0
         self.num_oversampling = schedule.oversampling
         self.trans_grid_extent = float(schedule.trans_grid_extent)
+        self.trans_grid_samples = int(
+            getattr(schedule, "trans_grid_samples", self.trans_grid_samples)
+        )
 
-        if int(self.base_healpix_order) < 1:
-            raise ValueError("healpix_order must be >= 1")
+        if int(self.base_healpix_order) < 0:
+            raise ValueError("healpix_order must be >= 0")
         if self.trans_grid_extent < 0:
             raise ValueError("trans_grid_extent must be >= 0")
+        if self.trans_grid_samples <= 0:
+            raise ValueError("trans_grid_samples must be > 0")
 
     def _refresh_pose_grid(self) -> None:
         healpix_order = self.base_healpix_order
@@ -257,52 +275,6 @@ class HEALPixPoseSearcher(torch.nn.Module):
             denom = torch.zeros_like(counts)
             denom[counts > 0] = 1.0 / counts[counts > 0]
             self._set_buffer("ring_denom", denom, persistent=False)
-
-    def _radial_residual_power(
-        self,
-        proj_image: torch.Tensor,
-        trans_image: torch.Tensor,
-        *,
-        sel2proj_idx: torch.LongTensor,
-        sel2trans_idx: torch.LongTensor,
-    ) -> torch.Tensor:
-        """Compute radial residual power for selected hypotheses.
-
-        Args:
-            proj_image: Projection buffer of shape ``(U_proj, P)`` or ``(B*K*Q, P)``.
-            trans_image: Translated-image buffer of shape ``(U_trans, P)`` or ``(B*T, P)``.
-            sel2proj_idx: Row indices mapping each selected hypothesis to ``proj_image``.
-            sel2trans_idx: Row indices mapping each selected hypothesis to ``trans_image``.
-
-        Returns:
-            Tensor of shape ``(N_sel, R)`` containing the per-ring mean squared residual
-            for each selected hypothesis.
-        """
-        sel2proj_idx = sel2proj_idx.to(device=proj_image.device, dtype=torch.long)
-        sel2trans_idx = sel2trans_idx.to(device=trans_image.device, dtype=torch.long)
-        ring_idx = self.valid_pixel2ring_idx
-        ring_denom = self.ring_denom
-        if ring_idx.device != proj_image.device:
-            ring_idx = ring_idx.to(proj_image.device)
-        if ring_denom.device != proj_image.device:
-            ring_denom = ring_denom.to(proj_image.device)
-
-        N = int(sel2proj_idx.numel())
-        radial_residual_power = torch.zeros((N, int(self.R)), device=proj_image.device, dtype=torch.float32)
-        residual_chunk = max(1, int(self.mse_chunk))
-        for chunk_start in range(0, N, residual_chunk):
-            chunk_end = min(chunk_start + residual_chunk, N)
-            proj_sel = proj_image.index_select(0, sel2proj_idx[chunk_start:chunk_end])
-            trans_sel = trans_image.index_select(0, sel2trans_idx[chunk_start:chunk_end])
-            residual_power = (proj_sel - trans_sel).abs().square().to(torch.float32)
-            radial_residual_power[chunk_start:chunk_end].scatter_add_(
-                1,
-                ring_idx.view(1, -1).expand(chunk_end - chunk_start, -1),
-                residual_power,
-            )
-            radial_residual_power[chunk_start:chunk_end] *= ring_denom.view(1, -1)
-
-        return radial_residual_power
 
     
     def _refresh_caches(self) -> None:
@@ -434,7 +406,7 @@ class HEALPixPoseSearcher(torch.nn.Module):
         Returns:
             trans: Neighbor translation-grid coordinates with shape ``(4 * N, 2)``.
                 These are grid-defined translations before adding any per-image
-                ``pose.translation(...)`` center.
+                active translation center.
             trans_grid_idx: Neighbor indices with shape ``(4 * N, 2)``.
         """
         trans_healpix_order = int(self.current_trans_healpix_order)
@@ -531,29 +503,54 @@ class HEALPixPoseSearcher(torch.nn.Module):
             Complex Fourier projections of shape ``(B, K * Q, P)``, where ``P`` is the number of
             valid Fourier pixels selected by ``valid_pixel_mask``.
         """
-        B = int(ctf.shape[0]) if ctf is not None else 1
+        rotation = rotation.to(self.device)
+        use_base_rotation = torch.equal(rotation, self.base_rot)
+
         K = int(self.volume.num_volumes)
         Q = int(rotation.shape[0])
         L = self.side_length
-
-        cache_ok = self.memory_cache.base_proj_cache_ok(side_length=L)
+        # Projection follows the current autograd context: differentiable callers
+        # must rebuild projections from the live volume, while inference/search
+        # callers may reuse cached base projections.
+        use_grad_proj = torch.is_grad_enabled() and bool(getattr(self.volume, "requires_grad", False))
+        cache_ok = (
+            not use_grad_proj
+            and use_base_rotation
+            and self.memory_cache.base_proj_cache_ok(side_length=L)
+        )
 
         if not cache_ok:
             rotation = rotation.view(1, Q, 3, 3).expand(K, -1, -1, -1)  # (K, Q, 3, 3)
 
             if self.pose_chunk_factor is not None:
                 proj_chunk = math.ceil((self.pose_chunk_factor / L) ** 2 / K)
-                raw_proj = torch.empty(K, Q, L, L, dtype=torch.complex64, device=self.device)
-                for chunk_start in range(0, rotation.shape[1], proj_chunk):
-                    chunk_end = min(chunk_start + proj_chunk, rotation.shape[1])
-                    raw_proj[:, chunk_start:chunk_end] = self.volume.project(
-                        rotation[:, chunk_start:chunk_end], side_length=L
+                if use_grad_proj:
+                    raw_proj = torch.cat(
+                        [
+                            self.volume(
+                                rotation[:, chunk_start:min(chunk_start + proj_chunk, rotation.shape[1])],
+                                side_length=L,
+                            )
+                            for chunk_start in range(0, rotation.shape[1], proj_chunk)
+                        ],
+                        dim=1,
                     )
+                else:
+                    raw_proj = torch.empty(K, Q, L, L, dtype=torch.complex64, device=self.device)
+                    for chunk_start in range(0, rotation.shape[1], proj_chunk):
+                        chunk_end = min(chunk_start + proj_chunk, rotation.shape[1])
+                        raw_proj[:, chunk_start:chunk_end] = self.volume.project(
+                            rotation[:, chunk_start:chunk_end], side_length=L
+                        )
             else:
-                raw_proj = self.volume.project(rotation, side_length=L)  # (K, Q, L, L)
+                if use_grad_proj:
+                    raw_proj = self.volume(rotation, side_length=L)
+                else:
+                    raw_proj = self.volume.project(rotation, side_length=L)  # (K, Q, L, L)
 
             raw_proj = raw_proj.reshape(K * Q, L * L)[:, self.valid_pixel_mask].contiguous()  # (K * Q, P)
-            self.memory_cache.set_base_proj(proj=raw_proj, side_length=L)
+            if use_base_rotation and not use_grad_proj:
+                self.memory_cache.set_base_proj(proj=raw_proj, side_length=L)
         else:
             raw_proj = self.memory_cache.get_base_proj()  # (K * Q, P)
 
@@ -571,7 +568,85 @@ class HEALPixPoseSearcher(torch.nn.Module):
             proj = proj * ctf_valid
 
         return proj
-    
+
+    def project_global(
+        self,
+        rotation: torch.Tensor | None = None,
+        *,
+        ctf: torch.Tensor | None = None,
+        return_geometry: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, PoseGeometry]:
+        """Project the global rotation grid exposed by this searcher.
+
+        Args:
+            rotation: Optional rotation matrices of shape ``(Q, 3, 3)``. If
+                omitted, uses the searcher's base global rotation grid.
+            ctf: Optional CTF tensor of shape ``(B, D, D)`` or ``(B, L, L)``.
+            return_geometry: If ``True``, also return the rotation matrices used
+                to produce the projections.
+
+        Returns:
+            Complex tensor of shape ``(B_or_1, K * Q, P)`` over the searcher's
+            valid Fourier pixels. When ``return_geometry=True``, returns a tuple
+            ``(proj_image, geometry)`` where ``geometry.rotmat`` has shape
+            ``(Q, 3, 3)`` and ``geometry.quat`` is available for the base global
+            rotation grid.
+        """
+        quat = None
+        if rotation is None:
+            rotation = self.base_rot
+            quat = self.base_quat
+        proj_image = self._project_global(rotation, ctf=ctf)
+        if return_geometry:
+            return proj_image, PoseGeometry(quat=quat, rotmat=rotation)
+        return proj_image
+
+    def _global_translation_grid(
+        self,
+        *,
+        particle_index: torch.LongTensor | None = None,
+        batch_size: int | None = None,
+        device: torch.device | None = None,
+    ) -> torch.Tensor:
+        """Return the global translation grid with shape ``(B, T, 2)``."""
+        if device is None:
+            device = self.device
+
+        if particle_index is not None:
+            batch_size = int(particle_index.shape[0])
+        elif batch_size is None:
+            raise ValueError("batch_size is required when particle_index is not provided")
+
+        B = int(batch_size)
+        if self.pose is None:
+            if particle_index is not None:
+                raise ValueError("particle_index must be None when pose is not available")
+            trans_center = torch.zeros(
+                (B, 2),
+                device=device,
+                dtype=self.base_trans.dtype,
+            )
+        else:
+            if bool(self.state.schedule.use_pose_translation_as_center):
+                if particle_index is None:
+                    raise ValueError(
+                        "particle_index is required when pose translation is used as the global center"
+                    )
+                particle_index = particle_index.to(device=self.pose.device, dtype=torch.long)
+                trans_center = self.pose.translation(particle_index).detach().to(
+                    device=device,
+                    dtype=self.base_trans.dtype,
+                )
+            else:
+                trans_center = torch.zeros(
+                    (B, 2),
+                    device=device,
+                    dtype=self.base_trans.dtype,
+                )
+
+        base_trans = self.base_trans.to(device=device, dtype=self.base_trans.dtype)
+        return trans_center.view(B, 1, 2) + base_trans.view(1, self.num_base_trans, 2)
+
     def _translate_global(self, image: torch.Tensor, translation: torch.Tensor) -> torch.Tensor:
         """Apply 2D translations to Fourier-domain images.
 
@@ -616,6 +691,87 @@ class HEALPixPoseSearcher(torch.nn.Module):
         if mask.device != trans_image.device:
             mask = mask.to(trans_image.device)
         return trans_image.reshape(B, T, L * L)[:, :, mask].contiguous()  # (B, T, P)
+
+    def translate_global(
+        self,
+        image: torch.Tensor,
+        *,
+        particle_index: torch.LongTensor | None = None,
+        translation: torch.Tensor | None = None,
+        geometry: PoseGeometry | None = None,
+        return_geometry: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, PoseGeometry]:
+        """Translate images on the global translation grid.
+
+        Args:
+            image: Fourier-domain images of shape ``(B, D, D)``.
+            particle_index: Particle indices used to resolve the active
+                translation-search center when ``translation`` is omitted.
+            translation: Optional translations of shape ``(B, T, 2)`` in input
+                FFT-grid pixel units. If omitted, uses the searcher's base
+                translation grid centered at the active per-particle translation
+                center.
+            geometry: Optional geometry container to augment with the active
+                translation grid.
+            return_geometry: If ``True``, also return the translation grid used
+                to produce the translated images.
+
+        Returns:
+            Complex tensor of shape ``(B, T, P)`` over the searcher's valid
+            Fourier pixels. When ``return_geometry=True``, returns a tuple
+            ``(trans_image, geometry)`` where ``geometry.trans`` has shape
+            ``(B, T, 2)``.
+        """
+        B = int(image.shape[0])
+        if translation is None:
+            translation = self._global_translation_grid(
+                particle_index=particle_index,
+                batch_size=B,
+                device=image.device,
+            )
+
+        trans_image = self._translate_global(image, translation)
+        if return_geometry:
+            if geometry is None:
+                geometry = PoseGeometry()
+            return trans_image, geometry.merged(trans=translation)
+        return trans_image
+
+    @torch.no_grad()
+    def best_pose_per_image(
+        self,
+        *,
+        prob: torch.Tensor,
+        geometry: PoseGeometry,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if geometry.quat is None:
+            raise ValueError("geometry.quat is required to decode the best rotation")
+        if geometry.trans is None:
+            raise ValueError("geometry.trans is required to decode the best translation")
+        if prob.ndim != 4:
+            raise ValueError(f"prob must have shape (B, K, Q, T), got {tuple(prob.shape)}")
+
+        B, _, Q, T = prob.shape
+        quat = geometry.quat
+        trans = geometry.trans
+        if quat.ndim != 2 or int(quat.shape[0]) != Q or int(quat.shape[1]) != 4:
+            raise ValueError(
+                f"geometry.quat must have shape (Q, 4) with Q={Q}, got {tuple(quat.shape)}"
+            )
+        if trans.ndim != 3 or int(trans.shape[0]) != B or int(trans.shape[1]) != T or int(trans.shape[2]) != 2:
+            raise ValueError(
+                f"geometry.trans must have shape (B, T, 2) with B={B}, T={T}, got {tuple(trans.shape)}"
+            )
+
+        flat_prob = prob.reshape(B, -1)
+        best_prob, best_flat_idx = flat_prob.max(dim=-1)
+        best_rot_idx = (best_flat_idx // T) % Q
+        best_trans_idx = best_flat_idx % T
+        best_quat = quat.index_select(0, best_rot_idx).contiguous()
+        best_trans = trans[
+            torch.arange(B, device=trans.device), best_trans_idx
+        ].contiguous()
+        return best_prob, best_quat, best_trans
     
     def _get_raw_proj_per_unique_rot(
         self,
@@ -899,7 +1055,7 @@ class HEALPixPoseSearcher(torch.nn.Module):
         # NOTE:
         # - translate_image interprets (dx, dy) in pixel units of the FFT grid of its input.
         # - `trans` is always in pixels of the original input grid D (search() unit convention).
-        # - We therefore translate on D×D and then crop to side_length L for likelihood eval.
+        # - We therefore translate on D×D and then crop to side_length L for pose-search evaluation.
         trans_image_per_uniq_req = downsample2d(trans_image_per_uniq_req, L)
 
         mask = self.valid_pixel_mask
@@ -998,11 +1154,13 @@ class HEALPixPoseSearcher(torch.nn.Module):
         proj_image: torch.Tensor,
         trans_image: torch.Tensor,
     ) -> torch.Tensor:
-        """Compute per-image probabilities over a broadcast hypothesis grid.
+        """Compute per-image hypothesis weights over a broadcast grid.
 
-        This evaluates the Cartesian product grid over ``(volume, rotation, translation)``
-        by computing a weighted spectral MSE between projected volumes and translated
-        images, and converting it to probabilities via ``exp(-mse)``.
+        This evaluates the Cartesian product grid over ``(volume, rotation, translation)``.
+        Under the ``posterior`` criterion it computes weighted spectral MSE and converts
+        it to normalized per-image probabilities via ``exp(-mse)``. Under the
+        ``correlation`` criterion it computes spectral cosine similarity and returns a
+        per-image hard one-hot selection at the maximum correlation.
 
         Distributed evaluation:
             If ``torch.distributed`` is initialized and ``device_mesh`` is provided,
@@ -1017,8 +1175,10 @@ class HEALPixPoseSearcher(torch.nn.Module):
             trans_image: Complex translated images with shape ``(B, T, P)``.
 
         Returns:
-            Flattened probabilities with shape ``(B * KQ * T,)``. Probabilities are
-            normalized independently for each image.
+            Flattened per-hypothesis weights with shape ``(B * KQ * T,)``. Under the
+            ``posterior`` criterion, weights are normalized independently for each image.
+            Under the ``correlation`` criterion, exactly one hypothesis per image has
+            weight 1.
         """
 
         B = int(trans_image.shape[0])
@@ -1030,8 +1190,37 @@ class HEALPixPoseSearcher(torch.nn.Module):
                 f"proj_image batch dim must match trans_image: {int(proj_image.shape[0])} vs {B}"
             )
 
+        criterion = self.state.schedule.pose_search_criterion
+
+        if proj_image.dim() != 3 or trans_image.dim() != 3:
+            raise ValueError(
+                f"expected proj_image/trans_image to be flattened (B,*,P); got {tuple(proj_image.shape)} and {tuple(trans_image.shape)}"
+            )
+
+        dist = getattr(torch, "distributed", None)
+        if (
+            dist is not None
+            and dist.is_available()
+            and dist.is_initialized()
+            and self.device_mesh is not None
+        ):
+            group = self.device_mesh.get_group(1)
+            calculation_parallel_size = dist.get_world_size(group)
+            calculation_process_rank = dist.get_rank(group)
+        else:
+            group = None
+            calculation_parallel_size = 1
+            calculation_process_rank = 0
+
+        slice_size = math.ceil(KQ / calculation_parallel_size)
+        slice_start = slice_size * calculation_process_rank
+        slice_end = min(slice_size * (calculation_process_rank + 1), KQ)
+
         @torch.no_grad()
-        def compute_mse_broadcast(proj_image, trans_image):
+        def compute_mse_broadcast(
+            proj_image: torch.Tensor,
+            trans_image: torch.Tensor,
+        ) -> torch.Tensor:
             device = self.device
             R = self.R
             if self.noise is None:
@@ -1039,53 +1228,26 @@ class HEALPixPoseSearcher(torch.nn.Module):
             else:
                 precision = self.noise.precision[:R].to(device)
             finite = torch.isfinite(precision)
-
             weight_r = torch.zeros_like(precision)
             weight_r[finite] = 0.5 * precision[finite]
             weight_r[0] = 0
             if self.ring_averaged_mse:
                 weight_r = weight_r * self.ring_denom
+            weight = weight_r[self.valid_pixel2ring_idx].contiguous()
 
-            weight = weight_r[self.valid_pixel2ring_idx].contiguous()  # (P,)
-
-
-            if proj_image.dim() != 3 or trans_image.dim() != 3:
-                raise ValueError(
-                    f"expected proj_image/trans_image to be flattened (B,*,P); got {tuple(proj_image.shape)} and {tuple(trans_image.shape)}"
-                )
-
-            mse = torch.zeros((B, KQ, T), device=self.device, dtype=torch.float32)
-
-            dist = getattr(torch, "distributed", None)
-
-            if (
-                dist is not None
-                and dist.is_available()
-                and dist.is_initialized()
-                and self.device_mesh is not None
-            ):
-                group = self.device_mesh.get_group(1)
-                calculation_parallel_size = dist.get_world_size(group)
-                calculation_process_rank = dist.get_rank(group)
-            else:
-                group = None
-                calculation_parallel_size = 1
-                calculation_process_rank = 0
-
-            slice_size = math.ceil(KQ / calculation_parallel_size)
-
-            slice_start = slice_size * calculation_process_rank
-            slice_end = min(slice_size * (calculation_process_rank + 1), KQ)
-
+            mse = torch.zeros((B, KQ, T), device=device, dtype=torch.float32)
             if slice_start < slice_end:
-                mse_chunk = self.mse_chunk
-                for chunk_start in range(slice_start, slice_end, mse_chunk):
-                    chunk_end = min(chunk_start + mse_chunk, slice_end)
+                criterion_chunk = self.criterion_chunk
+                for chunk_start in range(
+                    slice_start, slice_end, criterion_chunk
+                ):
+                    chunk_end = min(chunk_start + criterion_chunk, slice_end)
                     spectral_mse_loss(
                         proj_image[:, chunk_start:chunk_end],
                         trans_image,
                         weight=weight,
                         out=mse[:, chunk_start:chunk_end, :],
+                        spectral_reduction="sum",
                         reduction="none",
                     )
 
@@ -1096,19 +1258,61 @@ class HEALPixPoseSearcher(torch.nn.Module):
                 and calculation_parallel_size > 1
             ):
                 dist.all_reduce(mse, dist.ReduceOp.SUM, group)
-
             return mse.view(B, -1)
 
-        mse = compute_mse_broadcast(proj_image, trans_image) # (B, K * Q * T)
+        @torch.no_grad()
+        def compute_ncc_broadcast(
+            proj_image: torch.Tensor,
+            trans_image: torch.Tensor,
+        ) -> torch.Tensor:
+            device = self.device
+            R = self.R
+            # The correlation criterion is implemented as spectral cosine similarity,
+            # i.e. normalized cross correlation over the spectral representation.
+            weight_r = torch.ones((R,), device=device, dtype=torch.float32)
+            weight_r[0] = 0
+            weight = weight_r[self.valid_pixel2ring_idx].contiguous()
 
-        # Tackle underflow in exp()
-        mse_min = torch.amin(mse, dim=-1, keepdim=True) # (B, 1)
-        mse = mse - mse_min
-        prob = torch.exp(-mse) # (B, K * Q * T)
-        prob /= prob.sum(dim=-1, keepdim=True)
-        prob = prob.reshape(-1) # (B * K * Q * T,)
+            ncc = torch.zeros((B, KQ, T), device=device, dtype=torch.float32)
+            if slice_start < slice_end:
+                criterion_chunk = self.criterion_chunk
+                for chunk_start in range(
+                    slice_start, slice_end, criterion_chunk
+                ):
+                    chunk_end = min(chunk_start + criterion_chunk, slice_end)
+                    spectral_cosine_similarity(
+                        proj_image[:, chunk_start:chunk_end],
+                        trans_image,
+                        weight=weight,
+                        out=ncc[:, chunk_start:chunk_end, :],
+                        reduction="none",
+                    )
 
-        return prob
+            if (
+                dist is not None
+                and dist.is_available()
+                and dist.is_initialized()
+                and calculation_parallel_size > 1
+            ):
+                dist.all_reduce(ncc, dist.ReduceOp.SUM, group)
+            return ncc.view(B, -1)
+
+        if criterion == "posterior":
+            mse = compute_mse_broadcast(proj_image, trans_image)
+            mse_min = torch.amin(mse, dim=-1, keepdim=True) # (B, 1)
+            mse = mse - mse_min
+            prob = torch.exp(-mse) # (B, K * Q * T)
+            prob /= prob.sum(dim=-1, keepdim=True)
+            prob = prob.reshape(-1) # (B * K * Q * T,)
+            return prob
+        elif criterion == "correlation":
+            ncc = compute_ncc_broadcast(proj_image, trans_image)
+            best_idx = ncc.argmax(dim=-1, keepdim=True)
+            prob = torch.zeros_like(ncc)
+            prob.scatter_(1, best_idx, 1.0)
+            return prob.reshape(-1)
+        else:
+            raise ValueError(f"Unsupported pose_search_criterion: {criterion!r}")
 
     def _evaluate_indexed(
         self,
@@ -1119,14 +1323,15 @@ class HEALPixPoseSearcher(torch.nn.Module):
         hypo2proj_idx: torch.LongTensor,
         hypo2trans_idx: torch.LongTensor,
     ) -> torch.Tensor:
-        """Compute per-hypothesis probabilities for an indexed hypothesis set.
+        """Compute per-hypothesis weights for an indexed hypothesis set.
          
         This method evaluates only the hypotheses specified by index vectors.
         It is used for oversampling rounds after request de-duplication.
  
         Numerical stability:
-            Probabilities are computed as ``exp(-mse)``. To reduce underflow, the
-            per-image minimum MSE is subtracted before exponentiation.
+            Under the ``posterior`` criterion, probabilities are computed as
+            ``exp(-mse)``. To reduce underflow, the per-image minimum MSE is
+            subtracted before exponentiation.
  
         Distributed evaluation:
             If ``torch.distributed`` is initialized and ``device_mesh`` is
@@ -1144,18 +1349,41 @@ class HEALPixPoseSearcher(torch.nn.Module):
             hypo2trans_idx: Translation index into ``trans_image``, shape ``(U_hypo,)``.
  
         Returns:
-            Probabilities with shape ``(U_hypo,)``. For each image, probabilities
-            over that image's hypotheses sum to 1.
+            Per-hypothesis weights with shape ``(U_hypo,)``. Under the ``posterior``
+            criterion, weights over each image's hypotheses sum to 1. Under the
+            ``correlation`` criterion, exactly one hypothesis per image has weight 1.
         """
 
         B = int(num_images)
         U_hypo = int(hypo2img_idx.shape[0])
         
-        @torch.no_grad()
-        def compute_mse_indexed(proj_image, trans_image, hypo2proj_idx, hypo2trans_idx):  
-            # f_proj: (K * U_proj, P)
-            # f_trans: (U_trans, P)
+        criterion = self.state.schedule.pose_search_criterion
+        dist = getattr(torch, "distributed", None)
+        if (
+            dist is not None
+            and dist.is_available()
+            and dist.is_initialized()
+            and self.device_mesh is not None
+        ):
+            group = self.device_mesh.get_group(1)
+            calculation_parallel_size = dist.get_world_size(group)
+            calculation_process_rank = dist.get_rank(group)
+        else:
+            group = None
+            calculation_parallel_size = 1
+            calculation_process_rank = 0
 
+        slice_size = math.ceil(U_hypo / calculation_parallel_size)
+        slice_start = calculation_process_rank * slice_size
+        slice_end = min((calculation_process_rank + 1) * slice_size, U_hypo)
+
+        @torch.no_grad()
+        def compute_mse_indexed(
+            proj_image: torch.Tensor,
+            trans_image: torch.Tensor,
+            hypo2proj_idx: torch.LongTensor,
+            hypo2trans_idx: torch.LongTensor,
+        ) -> torch.Tensor:
             device = self.device
             R = self.R
             if self.noise is None:
@@ -1163,48 +1391,28 @@ class HEALPixPoseSearcher(torch.nn.Module):
             else:
                 precision = self.noise.precision[:R].to(device)
             finite = torch.isfinite(precision)
-
             weight_r = torch.zeros_like(precision)
             weight_r[finite] = 0.5 * precision[finite]
             weight_r[0] = 0
             if self.ring_averaged_mse:
                 weight_r = weight_r * self.ring_denom
+            weight = weight_r[self.valid_pixel2ring_idx].contiguous()
 
-            weight = weight_r[self.valid_pixel2ring_idx].contiguous()  # (P,)
-
-            mse = torch.zeros(U_hypo, device=self.device)
-
-            dist = getattr(torch, "distributed", None)
-
-            if (
-                dist is not None
-                and dist.is_available()
-                and dist.is_initialized()
-                and self.device_mesh is not None
-            ):
-                group = self.device_mesh.get_group(1)
-                calculation_parallel_size = dist.get_world_size(group)
-                calculation_process_rank = dist.get_rank(group)
-            else:
-                group = None
-                calculation_parallel_size = 1
-                calculation_process_rank = 0
-
-            slice_size = math.ceil(U_hypo / calculation_parallel_size)
-            chunk_start = calculation_process_rank * slice_size
-            chunk_end = min((calculation_process_rank + 1) * slice_size, U_hypo)
-
-            if chunk_start < chunk_end:
-                out_flat = mse[chunk_start:chunk_end]
-                spectral_mse_loss(
-                    proj_image,
-                    trans_image,
-                    weight=weight,
-                    input_indices=hypo2proj_idx[chunk_start:chunk_end],
-                    target_indices=hypo2trans_idx[chunk_start:chunk_end],
-                    out=out_flat,
-                    reduction="none",
-                )
+            mse = torch.zeros(U_hypo, device=device)
+            if slice_start < slice_end:
+                criterion_chunk = self.criterion_chunk
+                for chunk_start in range(slice_start, slice_end, criterion_chunk):
+                    chunk_end = min(chunk_start + criterion_chunk, slice_end)
+                    spectral_mse_loss(
+                        proj_image,
+                        trans_image,
+                        weight=weight,
+                        input_indices=hypo2proj_idx[chunk_start:chunk_end],
+                        target_indices=hypo2trans_idx[chunk_start:chunk_end],
+                        out=mse[chunk_start:chunk_end],
+                        spectral_reduction="sum",
+                        reduction="none",
+                    )
 
             if (
                 dist is not None
@@ -1213,21 +1421,78 @@ class HEALPixPoseSearcher(torch.nn.Module):
                 and calculation_parallel_size > 1
             ):
                 dist.all_reduce(mse, dist.ReduceOp.SUM, group)
-            
             return mse
 
-        mse = compute_mse_indexed(proj_image, trans_image, hypo2proj_idx, hypo2trans_idx) # (U_hypo,)
+        @torch.no_grad()
+        def compute_ncc_indexed(
+            proj_image: torch.Tensor,
+            trans_image: torch.Tensor,
+            hypo2proj_idx: torch.LongTensor,
+            hypo2trans_idx: torch.LongTensor,
+        ) -> torch.Tensor:
+            device = self.device
+            R = self.R
+            # The correlation criterion is implemented as spectral cosine similarity,
+            # i.e. normalized cross correlation over the spectral representation.
+            weight_r = torch.ones((R,), device=device, dtype=torch.float32)
+            weight_r[0] = 0
+            weight = weight_r[self.valid_pixel2ring_idx].contiguous()
 
-        # Subtract the min mse per image to prevent underflow 
-        min_per_img = torch.full((B,), float('inf'), device=mse.device)
-        min_per_img = min_per_img.scatter_reduce(0, hypo2img_idx, mse, reduce="amin") # (B,)
-        
-        mse = mse - min_per_img[hypo2img_idx]
-        prob = torch.exp(-mse)
-        sum_per_img =  torch.zeros(B, device=mse.device).scatter_add(0, hypo2img_idx, prob) # (B,)
-        prob /= sum_per_img[hypo2img_idx] # (U_hypo,)
+            ncc = torch.zeros(U_hypo, device=device)
+            if slice_start < slice_end:
+                criterion_chunk = self.criterion_chunk
+                for chunk_start in range(slice_start, slice_end, criterion_chunk):
+                    chunk_end = min(chunk_start + criterion_chunk, slice_end)
+                    spectral_cosine_similarity(
+                        proj_image,
+                        trans_image,
+                        weight=weight,
+                        input_indices=hypo2proj_idx[chunk_start:chunk_end],
+                        target_indices=hypo2trans_idx[chunk_start:chunk_end],
+                        out=ncc[chunk_start:chunk_end],
+                        reduction="none",
+                    )
 
-        return prob
+            if (
+                dist is not None
+                and dist.is_available()
+                and dist.is_initialized()
+                and calculation_parallel_size > 1
+            ):
+                dist.all_reduce(ncc, dist.ReduceOp.SUM, group)
+            return ncc
+
+        if criterion == "posterior":
+            mse = compute_mse_indexed(
+                proj_image, trans_image, hypo2proj_idx, hypo2trans_idx
+            )
+            min_per_img = torch.full((B,), float('inf'), device=mse.device)
+            min_per_img = min_per_img.scatter_reduce(0, hypo2img_idx, mse, reduce="amin") # (B,)
+            
+            mse = mse - min_per_img[hypo2img_idx]
+            prob = torch.exp(-mse)
+            sum_per_img =  torch.zeros(B, device=mse.device).scatter_add(0, hypo2img_idx, prob) # (B,)
+            prob /= sum_per_img[hypo2img_idx] # (U_hypo,)
+            
+            return prob
+        elif criterion == "correlation":
+            ncc = compute_ncc_indexed(
+                proj_image, trans_image, hypo2proj_idx, hypo2trans_idx
+            )
+            prob = torch.zeros_like(ncc)
+            _, image_counts = torch.unique_consecutive(
+                hypo2img_idx, return_counts=True
+            )
+            start = 0
+            for count in image_counts.detach().cpu().tolist():
+                end = start + int(count)
+                prob[start + int(ncc[start:end].argmax().item())] = 1.0
+                start = end
+            if start != U_hypo or int(image_counts.numel()) != B:
+                raise RuntimeError("indexed hypotheses must cover every image exactly once")
+            return prob
+        else:
+            raise ValueError(f"Unsupported pose_search_criterion: {criterion!r}")
         
     def _select_by_prob(
         self,
@@ -1292,8 +1557,7 @@ class HEALPixPoseSearcher(torch.nn.Module):
             sel_idx = start + prob_idx_sorted[:keep_count]
 
             sel_prob_part = prob_sorted[:keep_count].clone()
-            if self.renormalize_sel_prob:
-                sel_prob_part = sel_prob_part / sel_prob_part.sum()
+            sel_prob_part = sel_prob_part / sel_prob_part.sum()
 
             if LOGGER.isEnabledFor(logging.DEBUG):
                 selected_ratio = 100.0 * keep_count / img_cnt
@@ -1331,6 +1595,47 @@ class HEALPixPoseSearcher(torch.nn.Module):
 
         return sel_prob, sel2img_idx, sel_payload
 
+    def _apply_volume_class_similarity(
+        self,
+        *,
+        hypo_prob: torch.Tensor,
+        hypo2img_idx: torch.LongTensor,
+        hypo2vol_idx: torch.LongTensor,
+        num_images: int,
+        num_volumes: int,
+    ) -> torch.Tensor:
+        similarity = float(self.volume_class_similarity)
+        if num_volumes <= 1 or similarity <= 0.0:
+            return hypo_prob
+        if (
+            self.volume_class_similarity_scope == "global"
+            and self.state.schedule.pose_search_scope != "global"
+        ):
+            return hypo_prob
+
+        flat_class_idx = hypo2img_idx * int(num_volumes) + hypo2vol_idx
+        marginal = torch.zeros(
+            int(num_images) * int(num_volumes),
+            device=hypo_prob.device,
+            dtype=hypo_prob.dtype,
+        )
+        marginal = marginal.scatter_add(0, flat_class_idx, hypo_prob).view(
+            int(num_images), int(num_volumes)
+        )
+        mixed_marginal = (1.0 - similarity) * marginal + similarity / float(num_volumes)
+
+        eps = torch.finfo(hypo_prob.dtype).tiny
+        scale = mixed_marginal.reshape(-1)[flat_class_idx] / marginal.reshape(-1)[
+            flat_class_idx
+        ].clamp_min(eps)
+        adjusted_prob = hypo_prob * scale
+        sum_per_img = torch.zeros(
+            int(num_images),
+            device=adjusted_prob.device,
+            dtype=adjusted_prob.dtype,
+        ).scatter_add(0, hypo2img_idx, adjusted_prob)
+        return adjusted_prob / sum_per_img[hypo2img_idx].clamp_min(eps)
+
     def _gather_selected_candidates(
         self,
         *,
@@ -1355,14 +1660,19 @@ class HEALPixPoseSearcher(torch.nn.Module):
         self,
         *,
         B: int,
+        sel_prob: torch.Tensor,
         sel2img_idx: torch.LongTensor,
+        sel2vol_idx: torch.LongTensor,
         sel_quat: torch.Tensor,
         sel_trans: torch.Tensor,
     ):
         # Assumes selected candidates are grouped by image index, and within each image
         # group the first candidate is already the highest-probability one.
+        best_vol_idx = torch.zeros((B,), device=self.device, dtype=torch.long)
         best_quat = torch.zeros((B, 4), device=self.device, dtype=torch.float32)
         best_trans = torch.zeros((B, 2), device=self.device, dtype=torch.float32)
+        best_confidence = torch.zeros((B,), device=self.device, dtype=sel_prob.dtype)
+        best_volume_class_confidence = torch.zeros((B,), device=self.device, dtype=sel_prob.dtype)
 
         sel_img_idx_unique, sel_img_counts = torch.unique_consecutive(
             sel2img_idx, return_counts=True
@@ -1384,17 +1694,44 @@ class HEALPixPoseSearcher(torch.nn.Module):
 
         sel_best_src_idx = torch.cumsum(sel_img_counts, dim=0) - sel_img_counts
 
+        best_vol_idx.index_copy_(0, sel_img_idx_unique, sel2vol_idx[sel_best_src_idx])
         best_quat.index_copy_(0, sel_img_idx_unique, sel_quat[sel_best_src_idx])
         best_trans.index_copy_(0, sel_img_idx_unique, sel_trans[sel_best_src_idx])
+        best_confidence.index_copy_(0, sel_img_idx_unique, sel_prob[sel_best_src_idx])
 
-        return best_quat, best_trans
+        group_start = 0
+        num_volumes = int(self.volume.num_volumes)
+        for img_idx, group_size, best_src_idx in zip(
+            sel_img_idx_unique.tolist(),
+            sel_img_counts.tolist(),
+            sel_best_src_idx.tolist(),
+        ):
+            group_end = group_start + group_size
+            volume_prob = torch.zeros(
+                (num_volumes,), device=self.device, dtype=sel_prob.dtype
+            )
+            volume_prob.scatter_add_(
+                0,
+                sel2vol_idx[group_start:group_end],
+                sel_prob[group_start:group_end],
+            )
+            best_volume_class_confidence[img_idx] = volume_prob[sel2vol_idx[best_src_idx]]
+            group_start = group_end
+
+        return (
+            best_vol_idx,
+            best_quat,
+            best_trans,
+            best_confidence,
+            best_volume_class_confidence,
+        )
 
     @torch.no_grad()
-    def search(
+    def search_no_grad(
         self,
         image: torch.Tensor,
         *,
-        particle_index: torch.LongTensor,
+        particle_index: torch.LongTensor | None = None,
         ctf: torch.Tensor | None = None,
     ) -> tuple[
         torch.Tensor,
@@ -1407,8 +1744,8 @@ class HEALPixPoseSearcher(torch.nn.Module):
 
         Args:
             image: Fourier-domain images of shape ``(B, D, D)`` (complex).
-            particle_index: Particle indices of shape ``(B,)``. Used when accumulating the
-                best pose back into ``self.pose``.
+            particle_index: Optional particle indices of shape ``(B,)``. Required when
+                ``self.pose`` is available and omitted in pose-less global search mode.
             ctf: Optional per-image CTF tensor of shape ``(B, D, D)`` (or ``(B, L, L)``).
                 The batch dimension must match ``image.shape[0]`` (no broadcasting).
 
@@ -1416,7 +1753,7 @@ class HEALPixPoseSearcher(torch.nn.Module):
             A 6-tuple ``(sel_prob, sel2img_idx, sel2vol_idx, sel_rotmat, sel_trans,
             sel_radial_residual_power)``, where:
 
-            - sel_prob (torch.Tensor): Selected hypothesis probabilities with shape ``(N_sel,)``.
+            - sel_prob (torch.Tensor): Selected hypothesis weights with shape ``(N_sel,)``.
               Candidates are grouped by image index (``sel2img_idx``).
             - sel2img_idx (torch.LongTensor): Image indices for each selected hypothesis with shape
               ``(N_sel,)``.
@@ -1427,24 +1764,53 @@ class HEALPixPoseSearcher(torch.nn.Module):
             - sel_trans (torch.Tensor): 2D translations (in pixels) for each selected hypothesis with shape
               ``(N_sel, 2)``.
             - sel_radial_residual_power (torch.Tensor | None): Optional per-hypothesis radial
-              residual power with shape ``(N_sel, side_length // 2 + 1)``. Returned only when
-              noise estimation is enabled.
+              residual power with shape ``(N_sel, side_length // 2 + 1)``. Returned only on
+              the ``posterior`` route when noise estimation is enabled and full backprojection
+              is disabled.
 
               Unit convention: translations are expressed in pixels of the *input* Fourier grid
               (``D = image.shape[-1]``) and are not scaled by the current ``side_length``.
         """
         device = self.device
+        criterion = self.state.schedule.pose_search_criterion
+        if criterion == "posterior":
+            posterior_search = True
+        elif criterion == "correlation":
+            posterior_search = False
+        else:
+            raise ValueError(f"Unsupported pose_search_criterion: {criterion!r}")
 
         image = image.to(device)
-        particle_index = particle_index.to(device=device)
 
         B = int(image.shape[0])
         K = int(self.volume.num_volumes)
-        pose_trans = self.pose.translation(particle_index).to(device=device, dtype=self.base_trans.dtype)
+        if self.pose is None:
+            if particle_index is not None:
+                raise ValueError("particle_index must be None when pose is not available")
+            trans_center = torch.zeros(
+                (B, 2),
+                device=device,
+                dtype=self.base_trans.dtype,
+            )
+        else:
+            if particle_index is None:
+                raise ValueError("particle_index is required when pose is available")
+            particle_index = particle_index.to(device=self.pose.device, dtype=torch.long)
+            if bool(self.state.schedule.use_pose_translation_as_center):
+                trans_center = self.pose.translation(particle_index).detach().to(
+                    device=device,
+                    dtype=self.base_trans.dtype,
+                )
+            else:
+                trans_center = torch.zeros(
+                    (int(particle_index.shape[0]), 2),
+                    device=device,
+                    dtype=self.base_trans.dtype,
+                )
         # NOTE:
         # - All translations produced/consumed by this searcher are in pixel units of the input FFT grid
         #   (D = image.shape[-1]) and are never rescaled when side_length changes.
-        # - Likelihood is evaluated on a cropped side_length-L window, but translations are applied on D×D
+        # - The pose-search criterion is evaluated on a cropped side_length-L window, but translations are applied on D×D
         #   first (via translate_image) and only then center-cropped to L.
 
         if ctf is not None:
@@ -1493,8 +1859,8 @@ class HEALPixPoseSearcher(torch.nn.Module):
             #   volume x SO(3) rotation x 2D translation.
             #
             # Projections are computed for all volumes and base rotations (optionally cached).
-            # For each image, translation candidates are centered at its current pose
-            # translation and offset by the shared base translation grid. Probabilities are
+            # For each image, translation candidates are centered at the active per-image
+            # translation center and offset by the shared base translation grid. Probabilities are
             # normalized per image and then truncated by cumulative probability to keep a
             # manageable candidate set.
             Q = self.num_base_rot
@@ -1504,10 +1870,13 @@ class HEALPixPoseSearcher(torch.nn.Module):
             if int(proj_image.shape[0]) == 1:
                 proj_image = proj_image.expand(B, *proj_image.shape[1:])  # shape: (B, K*Q, P)
 
-            trans = pose_trans.view(B, 1, 2) + self.base_trans.view(1, T, 2)  # shape: (B, T, 2)
+            trans = trans_center.view(B, 1, 2) + self.base_trans.view(1, T, 2)  # shape: (B, T, 2)
             trans_image = self._translate_global(image, trans)  # shape: (B, T, P)
 
-            hypo_prob = self._evaluate_broadcast(proj_image, trans_image)  # shape: (B*K*Q*T,)
+            hypo_prob = self._evaluate_broadcast(
+                proj_image,
+                trans_image,
+            )  # shape: (B*K*Q*T,)
             hypo_dev = hypo_prob.device
             hypo2img_idx = (
                 torch.arange(B, device=hypo_dev)
@@ -1533,6 +1902,13 @@ class HEALPixPoseSearcher(torch.nn.Module):
                 .expand(B, K, Q, -1)
                 .reshape(-1)
             )  # shape: (B*K*Q*T,)
+            hypo_prob = self._apply_volume_class_similarity(
+                hypo_prob=hypo_prob,
+                hypo2img_idx=hypo2img_idx,
+                hypo2vol_idx=hypo2vol_idx,
+                num_images=B,
+                num_volumes=K,
+            )
 
             sel_prob, sel2img_idx, sel_payload = self._select_by_prob(
                 hypo_prob=hypo_prob,
@@ -1547,7 +1923,7 @@ class HEALPixPoseSearcher(torch.nn.Module):
             sel2rot_idx = sel_payload["rot"]
             sel2trans_idx = sel_payload["trans"]
 
-            if self.noise is not None:
+            if self.noise is not None and posterior_search:
                 proj_flat = proj_image.reshape(B * (K * Q), -1)
                 trans_flat = trans_image.reshape(B * T, -1)
                 sel2proj_flat_idx = sel2img_idx * (K * Q) + sel2vol_idx * Q + sel2rot_idx
@@ -1572,9 +1948,17 @@ class HEALPixPoseSearcher(torch.nn.Module):
                 sel_trans = sel_trans[None, :]
                 sel2trans_grid_idx = sel2trans_grid_idx[None, :]
 
-            best_quat, best_trans = self._select_best_per_image(
+            (
+                best_vol_idx,
+                best_quat,
+                best_trans,
+                best_confidence,
+                best_volume_class_confidence,
+            ) = self._select_best_per_image(
                 B=B,
+                sel_prob=sel_prob,
                 sel2img_idx=sel2img_idx,
+                sel2vol_idx=sel2vol_idx,
                 sel_quat=sel_quat,
                 sel_trans=sel_trans,
             )
@@ -1603,8 +1987,8 @@ class HEALPixPoseSearcher(torch.nn.Module):
             )
             trans2img_idx = sel2img_idx.repeat_interleave(4)
             # ``grid_trans`` lives on the refined shared translation grid; add the
-            # corresponding per-image pose center to obtain absolute translations.
-            trans = pose_trans.index_select(0, trans2img_idx) + grid_trans
+            # corresponding per-image active center to obtain absolute translations.
+            trans = trans_center.index_select(0, trans2img_idx) + grid_trans
 
             # After subdivision, rot_grid_idx / trans_grid_idx are already at the next
             # rotation / translation orders. Advance both order trackers before computing ids.
@@ -1681,7 +2065,7 @@ class HEALPixPoseSearcher(torch.nn.Module):
             sel2proj_req_idx = sel_payload["proj_req"]
             sel2trans_req_idx = sel_payload["trans_req"]
 
-            if self.noise is not None:
+            if self.noise is not None and posterior_search:
                 proj_flat = proj_image
                 trans_flat = trans_image
                 sel2proj_flat_idx = sel2proj_req_idx
@@ -1708,9 +2092,17 @@ class HEALPixPoseSearcher(torch.nn.Module):
                 sel_trans = sel_trans[None, :]
                 sel2trans_grid_idx = sel2trans_grid_idx[None, :]
 
-            best_quat, best_trans = self._select_best_per_image(
+            (
+                best_vol_idx,
+                best_quat,
+                best_trans,
+                best_confidence,
+                best_volume_class_confidence,
+            ) = self._select_best_per_image(
                 B=B,
+                sel_prob=sel_prob,
                 sel2img_idx=sel2img_idx,
+                sel2vol_idx=sel2vol_idx,
                 sel_quat=sel_quat,
                 sel_trans=sel_trans,
             )
@@ -1718,21 +2110,362 @@ class HEALPixPoseSearcher(torch.nn.Module):
         self.current_healpix_order = self.base_healpix_order
         self.current_trans_healpix_order = self.base_trans_healpix_order
 
-        self.pose.accumulate(
-            particle_index,
-            quaternion=best_quat,
-            translation=best_trans,
-        )
+        if self.pose is not None:
+            self.pose.accumulate(
+                particle_index,
+                quaternion=best_quat,
+                translation=best_trans,
+                volume_index=best_vol_idx,
+                confidence=best_confidence,
+                volume_class_confidence=best_volume_class_confidence,
+            )
         sel_rotmat = quaternion_to_matrix(sel_quat).to(self.device)
 
-        if self.noise is not None and proj_flat is not None:
-            sel_radial_residual_power = self._radial_residual_power(
+        if (
+            self.noise is not None
+            and proj_flat is not None
+            and not self.state.schedule.full_backprojection
+            and posterior_search
+        ):
+            sel_radial_residual_power = radial_residual_power(
                 proj_flat,
                 trans_flat,
-                sel2proj_idx=sel2proj_flat_idx,
-                sel2trans_idx=sel2trans_flat_idx,
+                input_indices=sel2proj_flat_idx,
+                target_indices=sel2trans_flat_idx,
+                side_length=int(self.side_length),
+                max_radius=int(self.R) - 1,
+                ndim=2,
+                use_cache=True,
             )
 
         self.volume_version = getattr(self.volume, "volume_version", self.volume_version)
 
         return sel_prob, sel2img_idx, sel2vol_idx, sel_rotmat, sel_trans, sel_radial_residual_power
+
+    def search_grad(
+        self,
+        image: torch.Tensor,
+        *,
+        particle_index: torch.LongTensor | None = None,
+        ctf: torch.Tensor | None = None,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.LongTensor,
+        torch.LongTensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
+    ]:
+        """Run differentiable global posterior pose search.
+
+        This is the gradient-enabled counterpart to :meth:`search_no_grad`.
+        The current implementation is intentionally narrow and only supports the
+        SGD use case:
+
+        - global pose search
+        - posterior criterion
+        - no oversampling refinement
+
+        Args:
+            image: Fourier-domain images of shape ``(B, D, D)`` (complex).
+            particle_index: Optional particle indices of shape ``(B,)``. Required when
+                ``self.pose`` is available and omitted in pose-less global search mode.
+            ctf: Optional per-image CTF tensor of shape ``(B, D, D)`` (or ``(B, L, L)``).
+                The batch dimension must match ``image.shape[0]`` (no broadcasting).
+
+        Returns:
+            A 7-tuple ``(loss, sel_prob, sel2img_idx, sel2vol_idx, sel_rotmat, sel_trans,
+            sel_radial_residual_power)``, where:
+
+            - loss (torch.Tensor): Differentiable data term averaged over the batch.
+            - sel_prob (torch.Tensor): Selected hypothesis weights with shape ``(N_sel,)``.
+              Candidates are grouped by image index (``sel2img_idx``) and re-normalized within
+              each image after selection.
+            - sel2img_idx (torch.LongTensor): Image indices for each selected hypothesis with shape
+              ``(N_sel,)``.
+            - sel2vol_idx (torch.LongTensor): Volume/class indices for each selected hypothesis with
+              shape ``(N_sel,)``.
+            - sel_rotmat (torch.Tensor): Rotation matrices for each selected hypothesis with shape
+              ``(N_sel, 3, 3)``.
+            - sel_trans (torch.Tensor): 2D translations (in pixels) for each selected hypothesis
+              with shape ``(N_sel, 2)``.
+            - sel_radial_residual_power (torch.Tensor | None): Optional per-hypothesis radial
+              residual power with shape ``(N_sel, side_length // 2 + 1)``. Returned only when
+              noise estimation is enabled and full backprojection is disabled.
+
+              Unit convention: translations are expressed in pixels of the *input* Fourier grid
+              (``D = image.shape[-1]``) and are not scaled by the current ``side_length``.
+        """
+        if self.state.schedule.pose_search_scope != "global":
+            raise ValueError(
+                "HEALPixPoseSearcher.search_grad currently supports only "
+                f"pose_search_scope='global', got {self.state.schedule.pose_search_scope!r}"
+            )
+        criterion = self.state.schedule.pose_search_criterion
+        if criterion != "posterior":
+            raise ValueError(
+                "HEALPixPoseSearcher.search_grad currently supports only "
+                f"pose_search_criterion='posterior', got {criterion!r}"
+            )
+        if int(self.num_oversampling) != 0:
+            raise ValueError(
+                "HEALPixPoseSearcher.search_grad currently supports only "
+                f"oversampling=0, got {int(self.num_oversampling)}"
+            )
+
+        device = self.device
+        image = image.to(device)
+
+        B = int(image.shape[0])
+        K = int(self.volume.num_volumes)
+        if self.pose is None:
+            if particle_index is not None:
+                raise ValueError("particle_index must be None when pose is not available")
+            trans_center = torch.zeros(
+                (B, 2),
+                device=device,
+                dtype=self.base_trans.dtype,
+            )
+        else:
+            if particle_index is None:
+                raise ValueError("particle_index is required when pose is available")
+            particle_index = particle_index.to(device=self.pose.device, dtype=torch.long)
+            if bool(self.state.schedule.use_pose_translation_as_center):
+                trans_center = self.pose.translation(particle_index).detach().to(
+                    device=device,
+                    dtype=self.base_trans.dtype,
+                )
+            else:
+                trans_center = torch.zeros(
+                    (int(particle_index.shape[0]), 2),
+                    device=device,
+                    dtype=self.base_trans.dtype,
+                )
+
+        if ctf is not None:
+            if not isinstance(ctf, torch.Tensor):
+                ctf = torch.as_tensor(ctf)
+            if ctf.ndim == 2:
+                ctf = ctf.unsqueeze(0)
+            if ctf.ndim != 3:
+                raise ValueError(
+                    f"ctf must have shape (B, D, D) or (B, L, L), got {tuple(ctf.shape)}"
+                )
+            if int(ctf.shape[0]) != B:
+                raise ValueError(
+                    f"ctf batch must match image batch: expected B={B}, got ctf.shape[0]={int(ctf.shape[0])} "
+                    f"with full shape {tuple(ctf.shape)}"
+                )
+            ctf = ctf.to(device)
+
+        self.current_healpix_order = self.base_healpix_order
+        self.current_trans_healpix_order = self.base_trans_healpix_order
+        sel_radial_residual_power = None
+
+        current_volume_version = getattr(self.volume, "volume_version", None)
+        if current_volume_version is None:
+            raise RuntimeError(
+                "HEALPix pose search requires volume.volume_version for cache validation, "
+                "but it is missing."
+            )
+        if self.volume_version is None:
+            self.volume_version = current_volume_version
+        elif self.volume_version != current_volume_version:
+            self.volume_version = current_volume_version
+            self._refresh_caches()
+
+        with torch.enable_grad():
+            Q = self.num_base_rot
+            T = self.num_base_trans
+            KQ = K * Q
+
+            proj_image = self._project_global(self.base_rot, ctf=ctf)  # (B_or_1, K*Q, P)
+            if int(proj_image.shape[0]) == 1:
+                proj_image = proj_image.expand(B, KQ, -1)  # (B, K*Q, P)
+
+            trans = trans_center.view(B, 1, 2) + self.base_trans.view(1, T, 2)  # (B, T, 2)
+            trans_image = self._translate_global(image, trans)  # (B, T, P)
+
+            R = self.R
+            if self.noise is None:
+                precision = torch.ones((R,), device=device, dtype=torch.float32)
+            else:
+                precision = self.noise.precision[:R].to(device=device, dtype=torch.float32)
+            finite = torch.isfinite(precision)
+            weight_r = torch.zeros_like(precision)
+            weight_r[finite] = 0.5 * precision[finite]
+            weight_r[0] = 0
+            if self.ring_averaged_mse:
+                weight_r = weight_r * self.ring_denom.to(device=device, dtype=weight_r.dtype)
+            weight = weight_r[self.valid_pixel2ring_idx.to(device=device)].contiguous()
+
+            mse = spectral_mse_loss(
+                proj_image,
+                trans_image,
+                weight=weight,
+                reduction="none",
+                spectral_reduction="sum",
+            ).view(B, K, Q, T)
+            mse_flat = mse.reshape(B, KQ * T)
+            nll_per_image = math.log(KQ * T) - torch.logsumexp(-mse_flat, dim=-1)
+            loss = nll_per_image.mean()
+
+            hypo_prob = torch.softmax(-mse_flat, dim=-1).reshape(-1)
+            hypo_dev = hypo_prob.device
+            hypo2img_idx = (
+                torch.arange(B, device=hypo_dev)
+                .view(B, 1, 1, 1)
+                .expand(-1, K, Q, T)
+                .reshape(-1)
+            )
+            hypo2vol_idx = (
+                torch.arange(K, device=hypo_dev)
+                .view(1, K, 1, 1)
+                .expand(B, -1, Q, T)
+                .reshape(-1)
+            )
+            hypo2rot_idx = (
+                torch.arange(Q, device=hypo_dev)
+                .view(1, 1, Q, 1)
+                .expand(B, K, -1, T)
+                .reshape(-1)
+            )
+            hypo2trans_idx = (
+                torch.arange(T, device=hypo_dev)
+                .view(1, 1, 1, T)
+                .expand(B, K, Q, -1)
+                .reshape(-1)
+            )
+            hypo_prob = self._apply_volume_class_similarity(
+                hypo_prob=hypo_prob,
+                hypo2img_idx=hypo2img_idx,
+                hypo2vol_idx=hypo2vol_idx,
+                num_images=B,
+                num_volumes=K,
+            )
+
+            sel_prob, sel2img_idx, sel_payload = self._select_by_prob(
+                hypo_prob=hypo_prob,
+                hypo2img_idx=hypo2img_idx,
+                payload={
+                    "vol": hypo2vol_idx,
+                    "rot": hypo2rot_idx,
+                    "trans": hypo2trans_idx,
+                },
+            )
+            sel2vol_idx = sel_payload["vol"]
+            sel2rot_idx = sel_payload["rot"]
+            sel2trans_idx = sel_payload["trans"]
+
+            sel_quat = self.base_quat[sel2rot_idx]
+            sel_trans = trans[sel2img_idx, sel2trans_idx].contiguous()
+            sel_rotmat = quaternion_to_matrix(sel_quat).to(self.device)
+
+        (
+            best_vol_idx,
+            best_quat,
+            best_trans,
+            best_confidence,
+            best_volume_class_confidence,
+        ) = self._select_best_per_image(
+            B=B,
+            sel_prob=sel_prob,
+            sel2img_idx=sel2img_idx,
+            sel2vol_idx=sel2vol_idx,
+            sel_quat=sel_quat,
+            sel_trans=sel_trans,
+        )
+
+        self.current_healpix_order = self.base_healpix_order
+        self.current_trans_healpix_order = self.base_trans_healpix_order
+
+        if self.pose is not None:
+            with torch.no_grad():
+                self.pose.accumulate(
+                    particle_index,
+                    quaternion=best_quat,
+                    translation=best_trans,
+                    volume_index=best_vol_idx,
+                    confidence=best_confidence,
+                    volume_class_confidence=best_volume_class_confidence,
+                )
+
+        if self.noise is not None and not self.state.schedule.full_backprojection:
+            with torch.no_grad():
+                proj_flat = proj_image.reshape(B * KQ, -1)
+                trans_flat = trans_image.reshape(B * T, -1)
+                sel2proj_flat_idx = sel2img_idx * KQ + sel2vol_idx * Q + sel2rot_idx
+                sel2trans_flat_idx = sel2img_idx * T + sel2trans_idx
+                sel_radial_residual_power = radial_residual_power(
+                    proj_flat,
+                    trans_flat,
+                    input_indices=sel2proj_flat_idx,
+                    target_indices=sel2trans_flat_idx,
+                    side_length=int(self.side_length),
+                    max_radius=int(self.R) - 1,
+                    ndim=2,
+                    use_cache=True,
+                )
+
+        self.volume_version = getattr(self.volume, "volume_version", self.volume_version)
+
+        return (
+            loss,
+            sel_prob,
+            sel2img_idx,
+            sel2vol_idx,
+            sel_rotmat,
+            sel_trans,
+            sel_radial_residual_power,
+        )
+
+    def search(
+        self,
+        image: torch.Tensor,
+        *,
+        particle_index: torch.LongTensor | None = None,
+        ctf: torch.Tensor | None = None,
+        mode: str = "auto",
+    ):
+        """Dispatch to the gradient-enabled or no-grad HEALPix search route.
+
+        Args:
+            image: Fourier-domain images of shape ``(B, D, D)`` (complex).
+            particle_index: Optional particle indices of shape ``(B,)``. Required when
+                ``self.pose`` is available and omitted in pose-less global search mode.
+            ctf: Optional per-image CTF tensor of shape ``(B, D, D)`` (or ``(B, L, L)``).
+                The batch dimension must match ``image.shape[0]`` (no broadcasting).
+            mode: Search execution mode. ``"grad"`` dispatches to :meth:`search_grad`,
+                ``"no_grad"`` dispatches to :meth:`search_no_grad`, and ``"auto"``
+                dispatches to :meth:`search_grad` when autograd is enabled and the
+                volume requires gradients.
+
+        Returns:
+            The return value of the selected search route.
+        """
+        if mode == "grad":
+            return self.search_grad(
+                image,
+                particle_index=particle_index,
+                ctf=ctf,
+            )
+        if mode == "auto":
+            if torch.is_grad_enabled() and bool(getattr(self.volume, "requires_grad", False)):
+                return self.search_grad(
+                    image,
+                    particle_index=particle_index,
+                    ctf=ctf,
+                )
+            return self.search_no_grad(
+                image,
+                particle_index=particle_index,
+                ctf=ctf,
+            )
+        if mode == "no_grad":
+            return self.search_no_grad(
+                image,
+                particle_index=particle_index,
+                ctf=ctf,
+            )
+        raise ValueError(f"Unsupported search mode: {mode!r}")

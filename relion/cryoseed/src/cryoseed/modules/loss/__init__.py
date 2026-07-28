@@ -5,10 +5,15 @@ from typing import Any
 
 __all__ = [
     "SpectralMSELoss",
+    "SpectralCosineSimilarity",
 ]
 
 _EXPORTS: dict[str, tuple[str, str]] = {
     "SpectralMSELoss": ("spectral_mse_loss", "SpectralMSELoss"),
+    "SpectralCosineSimilarity": (
+        "spectral_cosine_similarity",
+        "SpectralCosineSimilarity",
+    ),
 }
 
 

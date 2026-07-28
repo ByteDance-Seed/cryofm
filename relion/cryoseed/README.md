@@ -24,7 +24,7 @@ cryoSeed is intended to expose core reconstruction functionality in a form that 
 - Python >= 3.10
 - PyTorch
 - CUDA-enabled GPU recommended
-- Triton, optional, for accelerated backend kernels
+- Triton (for accelerated backend kernels)
 
 ### Install from source
 
@@ -42,17 +42,17 @@ python -m pip install numpy scipy pandas matplotlib mrcfile starfile pyyaml tqdm
 # Optional: install Triton for accelerated backend kernels.
 python -m pip install triton
 
-# Install in editable mode from the repository root.
+# Install cryoSeed in editable mode.
 python -m pip install -e .
 ```
 
 ## Getting Started
 
-Apart from using as an reconstruction backbone in cryoFM, cryoSeed can also be used independently at different levels depending on whether you want to run an existing workflow or reuse individual reconstruction components.
+cryoSeed supports multiple usage modes depending on the level of control and customization you need.
 
-### 1. Construct a reconstruction pipeline in Python
+### 1. Construct your own reconstruction pipeline
 
-The most flexible usage mode is to assemble a reconstruction workflow directly in Python. This is mainly intended for method development, debugging, and experiments that require access to individual reconstruction components.
+The most flexible way to use cryoSeed is to build a reconstruction workflow directly in Python. This mode is intended for advanced users and method developers who want fine-grained control over the reconstruction procedure and its individual components.
 
 ```python
 from cryoseed.config import MainConfig
@@ -138,7 +138,7 @@ def main():
     state.schedule.proj_cache_backend = "memory" if config.scheduler.use_cache else "none"
     state.schedule.side_length = max(
         8,
-        2 * int(config.data.image_size * config.data.angpix / config.refinement.init_lowpass_angstrom),
+        2 * int(config.data.image_size * config.data.angpix / config.homorefine.init_lowpass_angstrom),
     )
 
     # Each half keeps its own volume, noise model, and pose estimates.
@@ -215,7 +215,7 @@ def main():
         switch_to_euler_order=4,
     )
 
-    for epoch in range(config.refinement.num_epochs):
+    for epoch in range(config.homorefine.num_epochs):
         state.progress.epoch = epoch
         state.metrics.confidence_sum = 0.0
         state.metrics.confidence_count = 0
@@ -224,7 +224,7 @@ def main():
         solver_half0.zero_accum()
         solver_half1.zero_accum()
 
-        # Half 0: E-step, pose search, followed by M-step, volume / noise / pose update.
+        # Half 0: E-step (pose search) followed by M-step (volume / noise / pose update).
         state.progress.half = 0
         solver_half0.refresh()
         for batch in dl_half0:
@@ -250,7 +250,7 @@ def main():
         state.metrics.fsc_resolution = fsc_to_resolution(
             fsc_scores,
             fsc_freqs,
-            threshold=config.refinement.fsc_threshold,
+            threshold=config.homorefine.fsc_threshold,
             voxel_size=config.data.angpix,
         )
         scheduler.step()
@@ -273,7 +273,7 @@ if __name__ == "__main__":
 
 ### 2. Import individual modules
 
-Individual cryoSeed modules can also be imported into custom scripts. This is useful when only a specific component is needed, such as a volume representation, Fourier transform utility, projection operation, or cryo-EM physics helper.
+If you only need specific components from cryoSeed, you can directly import individual modules into your own code. This is useful when only part of the framework is needed, such as a projection operator, a reconstruction loss, or a physics-related utility.
 
 ```python
 import mrcfile
@@ -312,11 +312,22 @@ print(f"voxel_shape={tuple(voxel.volume.shape)}")
 print(f"projection_shape={tuple(projection_real.shape)}")
 ```
 
-### 3. Use the command-line interface
+### 3. Use the command-line interface (CLI)
 
-cryoSeed also includes a configuration-driven command-line interface for running reconstruction experiments. This interface is mainly intended for reproducible experiments and internal benchmarking workflows.
+For end users and routine experiments, cryoSeed provides a command-line interface driven by configuration files. This is the most convenient way to run complete reconstruction experiments without writing Python code. Users can specify datasets, reconstruction settings, and runtime options through configuration files, and launch end-to-end workflows directly from the command line.
 
-The simplest way to launch homogeneous refinement is to pass the main input and output arguments directly:
+The two top-level workflow commands are:
+
+- `cryoseed homorefine`: homogeneous refinement
+- `cryoseed abinitio`: ab initio reconstruction
+
+The bundled config templates serve different roles:
+
+- `full_config.yaml`: full schema reference with schema-level defaults for every field
+- `src/cryoseed/config/defaults/homorefine.yaml`: homorefine template listing only homorefine-supported fields
+- `src/cryoseed/config/defaults/abinitio.yaml`: ab initio template listing only ab initio-supported fields
+
+The simplest way to launch homogeneous refinement is to pass the main input / output arguments directly:
 
 ```bash
 cryoseed homorefine \
@@ -342,6 +353,26 @@ For a complete list of CLI flags and configuration overrides, see:
 cryoseed homorefine --help
 ```
 
+The ab initio command is launched in the same way:
+
+```bash
+cryoseed abinitio \
+  --star-path path/to/particles.star \
+  --data-path path/to/particle_stack_dir \
+  --output-path outputs/abinitio_demo \
+  --num-volumes 3 \
+  --num-epochs 10
+```
+
+Use the command-specific help to see only the overrides supported by that workflow:
+
+```bash
+cryoseed abinitio --help
+cryoseed homorefine --help
+```
+
+When a run starts, the saved `output_path/config.yml` snapshot is also trimmed to the current command's supported fields.
+
 ## Project Structure
 
 The current organization of cryoSeed follows a layered and modular design:
@@ -355,7 +386,8 @@ cryoSeed/
 ├── modules/               # high-level reconstruction modules
 ├── optim/                 # solvers and optimization logic
 ├── ops/                   # core operators such as projection and backprojection
-├── cryoem/                # cryo-EM physics utilities, such as CTF and masks
+├── cryoem/                # cryo-EM physics utilities (e.g., CTF, masks)
 ├── backends/              # backend implementations with PyTorch / Triton
 ├── data/                  # data loading and preprocessing
+└── docs/                  # documentation and usage guides
 ```

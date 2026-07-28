@@ -18,6 +18,7 @@ def save_mrc(file_path: str, data: torch.Tensor, voxel_size: float) -> None:
     Notes:
         Data is written as ``float32``.
     """
+    data = data.detach()
     if data.is_cuda:
         data = data.cpu()
 

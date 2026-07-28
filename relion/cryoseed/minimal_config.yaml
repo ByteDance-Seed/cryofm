@@ -4,4 +4,9 @@ io:
   ref_volume_path: path/to/reference_volume.mrc
 
 data:
+  batch_size: 1
+  num_workers: 4
   particle_diameter: 200
+
+reconstruction:
+  num_volumes: 1

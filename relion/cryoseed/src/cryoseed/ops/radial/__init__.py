@@ -4,15 +4,19 @@ import importlib
 from typing import Any
 
 __all__ = [
+    "clear_radial_cache",
     "clear_radial_average_cache",
     "radial_average",
     "radial_broadcast",
+    "radial_residual_power",
 ]
 
 _EXPORTS: dict[str, tuple[str, str]] = {
+    "clear_radial_cache": ("radial", "clear_radial_cache"),
     "clear_radial_average_cache": ("radial", "clear_radial_average_cache"),
     "radial_average": ("radial", "radial_average"),
     "radial_broadcast": ("radial", "radial_broadcast"),
+    "radial_residual_power": ("radial_residual_power", "radial_residual_power"),
 }
 
 

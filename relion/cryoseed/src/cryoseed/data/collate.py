@@ -21,10 +21,10 @@ def data_collate_fn(
 
             - ``"image_real"`` (torch.Tensor): Real-space image, shape ``(D, D)``.
             - ``"particle_index"`` (int): Dataset-level particle index.
+            - ``"stack_index"`` (int): Index within the source MRC/MRCS stack.
 
             Optional keys (must be either present for all samples in the batch or absent for all):
 
-            - ``"stack_index"`` (int): Index within the source MRC/MRCS stack.
             - ``"euler"`` (torch.Tensor | None): Euler angles in radians, shape ``(3,)``.
             - ``"trans"`` (torch.Tensor | None): In-plane translation in pixels, shape ``(2,)``.
             - ``"ctf_params"`` (torch.Tensor | None): CTF parameter vector, shape ``(C,)``.

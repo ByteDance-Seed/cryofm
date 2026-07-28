@@ -40,34 +40,6 @@ def test_triton_project_backward_matches_torch(channel_last: bool):
     torch.testing.assert_close(vol_triton.grad, vol_torch.grad, rtol=5e-3, atol=5e-3)
 
 
-@pytest.mark.parametrize("channel_last", [True, False])
-def test_triton_project_backward_matches_torch_gen_kernel(channel_last: bool):
-    torch.manual_seed(11)
-    device = torch.device("cuda")
-
-    b, q, l, c = 1, 3, 6, 3
-    rotation = random_rotation(b, q, device=device)
-
-    if channel_last:
-        base = torch.randn(b, l, l, l, c, device=device, dtype=torch.float32)
-    else:
-        base = torch.randn(b, c, l, l, l, device=device, dtype=torch.float32)
-
-    vol_triton = base.clone().detach().requires_grad_(True)
-    vol_torch = base.clone().detach().requires_grad_(True)
-
-    out_triton = project_triton(vol_triton, rotation, channel_last=channel_last)
-    out_torch = project_torch(vol_torch, rotation, channel_last=channel_last)
-
-    torch.testing.assert_close(out_triton, out_torch, rtol=2e-3, atol=2e-3)
-
-    probe = torch.randn_like(out_torch)
-    (out_triton * probe).sum().backward()
-    (out_torch * probe).sum().backward()
-
-    torch.testing.assert_close(vol_triton.grad, vol_torch.grad, rtol=5e-3, atol=5e-3)
-
-
 def test_triton_project_backward_matches_finite_difference():
     torch.manual_seed(1)
     device = torch.device("cuda")

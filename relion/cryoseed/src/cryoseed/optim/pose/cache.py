@@ -1,3 +1,4 @@
+import logging
 import os
 import gc
 import time
@@ -12,6 +13,8 @@ import uuid
 from typing import Dict, Optional, Tuple, Iterable, List, Any
 
 import torch
+
+LOGGER = logging.getLogger(__name__)
 
 
 class MemoryProjCache:
@@ -86,6 +89,20 @@ class MemoryProjCache:
 
 
 class SSDProjCache:
+    """SSD-backed projection cache with process-wide serialized file operations.
+
+    This cache intentionally uses one shared worker queue/thread per process
+    rather than one worker per cache instance. The main goal is to avoid
+    same-process read/write/delete races between old and new cache instances
+    while a pose searcher refreshes cache directories. Cross-process
+    synchronization is still handled via lock files and ready markers on disk;
+    the shared worker only guarantees that this process does not issue
+    conflicting filesystem operations concurrently.
+
+    As a consequence, async writes and async cleanup are ordered process-wide,
+    and ``flush()`` waits for the shared queue to drain rather than flushing
+    only one instance in isolation.
+    """
     _ID_LOCK = threading.Lock()
     _ID_COUNTER = 0
 
@@ -95,6 +112,7 @@ class SSDProjCache:
 
     @classmethod
     def _ensure_worker(cls) -> "queue.Queue[Tuple[str, Tuple[Any, ...]]]":
+        """Return the shared worker queue, starting the process-wide worker if needed."""
         with cls._WORKER_LOCK:
             if cls._WORKER_QUEUE is None:
                 cls._WORKER_QUEUE = queue.Queue()
@@ -109,11 +127,13 @@ class SSDProjCache:
 
     @classmethod
     def _enqueue(cls, op: str, *args: Any) -> None:
+        """Schedule one filesystem operation on the shared worker queue."""
         q = cls._ensure_worker()
         q.put((op, tuple(args)))
 
     @classmethod
     def _worker_loop(cls) -> None:
+        """Serialize SSD cache filesystem operations within the current process."""
         q = cls._ensure_worker()
         while True:
             op, args = q.get()
@@ -130,7 +150,7 @@ class SSDProjCache:
                 elif op == "stop":
                     return
             except Exception:
-                pass
+                LOGGER.exception("SSD projection cache worker failed during `%s`.", op)
             finally:
                 try:
                     q.task_done()
@@ -311,9 +331,9 @@ class SSDProjCache:
                 missing.append(i)
         return missing
 
-    @staticmethod
-    def _write_item(cache_dir: str, key: int, tensor: torch.Tensor) -> bool:
-        data_file, meta_file, done_file, lock_file = self._paths(cache_dir, int(key))
+    @classmethod
+    def _write_item(cls, cache_dir: str, key: int, tensor: torch.Tensor) -> bool:
+        data_file, meta_file, done_file, lock_file = cls._paths(cache_dir, int(key))
 
         if os.path.exists(done_file) or (
             os.path.exists(data_file) and os.path.exists(meta_file)
@@ -451,6 +471,12 @@ class SSDProjCache:
         delete_root: bool = False,
         async_clear: bool = True,
     ):
+        """Clear cache files or directories.
+
+        When ``async_clear`` is true, cleanup is enqueued onto the shared
+        process-wide worker so that same-process delete/write operations remain
+        serialized across cache instances.
+        """
         if delete_root:
             cache_dir = self._cache_dir
             delete_dir = True
@@ -493,6 +519,11 @@ class SSDProjCache:
         async_clear: bool = False,
         cleanup: bool = True,
     ):
+        """Close this cache handle and optionally schedule cleanup.
+
+        Closing one instance does not stop the shared worker because that worker
+        may still be serving other SSDProjCache instances in the same process.
+        """
         if self._closed:
             return
         self._closed = True
@@ -512,6 +543,12 @@ class SSDProjCache:
                 self._finalizer = None
 
     def flush(self) -> None:
+        """Wait until the shared SSD cache worker queue is empty.
+
+        This is intentionally a process-wide flush. It is used before cache
+        directory refresh/cleanup boundaries so that older async writes from the
+        same process cannot race with later directory changes.
+        """
         try:
             q = self._ensure_worker()
             q.join()

@@ -7,6 +7,13 @@ Note:
 import torch
 
 
+def _promote_real_fft_dtype(r: torch.Tensor) -> torch.Tensor:
+    """Preserve float32/float64 inputs and upcast lower-precision real tensors for FFT."""
+    if r.dtype in (torch.float32, torch.float64):
+        return r
+    return r.to(dtype=torch.float32)
+
+
 def fourier_phase_shift(
     X: torch.Tensor, shift: torch.Tensor
 ) -> torch.Tensor:
@@ -40,7 +47,7 @@ def fourier_phase_shift(
 @torch.autocast("cuda")
 def primal_to_fourier_2d(r: torch.Tensor, norm="backward") -> torch.Tensor:
     with torch.autocast("cuda", enabled=False):
-        r = torch.fft.ifftshift(r.float(), dim=(-2, -1))
+        r = torch.fft.ifftshift(_promote_real_fft_dtype(r), dim=(-2, -1))
         f = torch.fft.fftshift(
             torch.fft.fftn(r, s=(r.shape[-2], r.shape[-1]), dim=(-2, -1), norm=norm),
             dim=(-2, -1),
@@ -51,7 +58,7 @@ def primal_to_fourier_2d(r: torch.Tensor, norm="backward") -> torch.Tensor:
 @torch.autocast("cuda")
 def primal_to_fourier_3d(r: torch.Tensor, norm="backward") -> torch.Tensor:
     with torch.autocast("cuda", enabled=False):
-        r = torch.fft.ifftshift(r.float(), dim=(-3, -2, -1))
+        r = torch.fft.ifftshift(_promote_real_fft_dtype(r), dim=(-3, -2, -1))
         f = torch.fft.fftshift(
             torch.fft.fftn(
                 r,

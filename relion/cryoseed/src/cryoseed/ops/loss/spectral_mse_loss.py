@@ -57,6 +57,7 @@ def _spectral_mse_loss_with_backend(
     out: Tensor | None,
     prefer_2stage: bool | None,
     reduction: Literal["none", "mean", "sum"],
+    spectral_reduction: Literal["auto", "mean", "sum"],
 ) -> Tensor:
     if backend == "triton":
         from cryoseed.backends.triton.spectral_mse_loss import spectral_mse_loss as spectral_mse_loss_triton
@@ -70,6 +71,7 @@ def _spectral_mse_loss_with_backend(
             out=out,
             prefer_2stage=prefer_2stage,
             reduction=reduction,
+            spectral_reduction=spectral_reduction,
         )
 
     if backend == "torch":
@@ -84,6 +86,7 @@ def _spectral_mse_loss_with_backend(
             out=out,
             prefer_2stage=prefer_2stage,
             reduction=reduction,
+            spectral_reduction=spectral_reduction,
         )
 
     raise ValueError(f"Unknown backend: {backend}")
@@ -99,14 +102,16 @@ def spectral_mse_loss(
     out: Tensor | None = None,
     prefer_2stage: bool | None = None,
     reduction: Literal["none", "mean", "sum"] = "mean",
+    spectral_reduction: Literal["auto", "mean", "sum"] = "auto",
 ) -> Tensor:
     """Compute a weighted sum of squared spectral differences.
 
     This is the recommended public entry point. It mirrors the API/semantics of the
     Triton backend, while automatically selecting an available backend.
 
-    The frequency-bin dimension ``D`` is always reduced internally via a weighted sum.
-    Any additional ``reduction`` is then applied over the per-pair/per-tile loss outputs.
+    The frequency-bin dimension ``D`` is reduced first according to
+    ``spectral_reduction``. Any additional ``reduction`` is then applied over the
+    per-pair/per-tile loss outputs.
 
     Two modes are supported:
 
@@ -138,16 +143,6 @@ def spectral_mse_loss(
             ``weight`` is flattened internally (via ``weight.reshape(-1)``) and must have
             exactly ``D`` elements.
 
-            Note:
-                When ``reduction='mean'``, ``weight`` is normalized to sum to 1 *before* the
-                spectral reduction. In that case, the per-pair/per-tile output is a weighted
-                mean over ``D`` (not a weighted sum). A final mean reduction is then applied
-                over the per-pair/per-tile outputs.
-
-                Therefore, in general,
-                ``spectral_mse_loss(..., reduction='none').mean()`` is not equal to
-                ``spectral_mse_loss(..., reduction='mean')`` unless ``weight`` is already
-                normalized.
         input_indices: Optional indices selecting rows from ``input`` (indexed mode). If on a
             different device, it is moved to ``input.device``.
         target_indices: Optional indices selecting rows from ``target`` (indexed mode). If on a
@@ -173,17 +168,31 @@ def spectral_mse_loss(
         reduction: Specifies the reduction to apply over the per-pair/per-tile loss outputs:
             ``'none'`` | ``'mean'`` | ``'sum'``.
 
-            - ``'none'``: return the unreduced loss tensor.
+            - ``'none'``: return the unreduced per-pair/per-tile loss tensor after spectral
+              reduction. In this mode, ``spectral_reduction`` must be explicitly set to
+              ``'mean'`` or ``'sum'``.
             - ``'mean'``: return the mean over all pair/tile losses.
             - ``'sum'``: return the sum over all pair/tile losses.
 
             Default: ``'mean'``.
+        spectral_reduction: Reduction to apply over the spectral / flattened feature dimension
+            ``D`` before the final pair/tile reduction:
+            ``'auto'`` | ``'mean'`` | ``'sum'``.
+
+            - ``'auto'``: follows ``reduction`` for scalar outputs. Resolves to ``'mean'`` when
+              ``reduction='mean'`` and to ``'sum'`` when ``reduction='sum'``. It is invalid
+              when ``reduction='none'``.
+            - ``'mean'``: normalize ``weight`` to sum to 1 before reducing over ``D``.
+            - ``'sum'``: reduce over ``D`` using the raw weights.
+
+            Default: ``'auto'``.
 
     Returns:
         A float32 tensor.
 
-        - ``reduction='none'``: unreduced loss tensor (indexed: ``(N,)``; broadcast: flat
-          ``(B * C_input * C_target,)`` unless ``out`` provides a 3D view).
+        - ``reduction='none'``: per-pair/per-tile loss tensor after spectral reduction
+          (indexed: ``(N,)``; broadcast: flat ``(B * C_input * C_target,)`` unless
+          ``out`` provides a 3D view).
         - ``reduction='mean'`` or ``'sum'``: scalar tensor.
 
     Backend policy:
@@ -213,6 +222,7 @@ def spectral_mse_loss(
                 out,
                 prefer_2stage,
                 reduction,
+                spectral_reduction,
             )
         except Exception as e:
             if _is_user_error(e):
@@ -234,6 +244,7 @@ def spectral_mse_loss(
                         out,
                         prefer_2stage,
                         reduction,
+                        spectral_reduction,
                     )
                     _BACKEND_SELECTION = backend
                     _BACKEND_ERROR = None
@@ -255,4 +266,5 @@ def spectral_mse_loss(
         out,
         prefer_2stage,
         reduction,
+        spectral_reduction,
     )

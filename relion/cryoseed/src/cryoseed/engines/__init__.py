@@ -4,19 +4,23 @@ import importlib
 from typing import Any
 
 __all__ = [
+    "AbInitioEngine",
     "HomoRefineEngine",
+    "abinitio",
     "external",
     "homorefine",
 ]
 
 _EXPORTS: dict[str, tuple[str, str]] = {
+    "AbInitioEngine": ("abinitio", "AbInitioEngine"),
     "HomoRefineEngine": ("homorefine", "HomoRefineEngine"),
 }
 
 
 def __getattr__(name: str) -> Any:
-    if name in {"external", "homorefine"}:
-        module = importlib.import_module(f"{__name__}.homorefine")
+    if name in {"abinitio", "external", "homorefine"}:
+        target_module = "homorefine" if name == "external" else name
+        module = importlib.import_module(f"{__name__}.{target_module}")
         globals()[name] = module
         return module
 

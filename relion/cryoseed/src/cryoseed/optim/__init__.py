@@ -4,20 +4,21 @@ import importlib
 from typing import Any
 
 __all__ = [
-    "pose",
     "EMSolver",
-    "FrequencyMarchingScheduler",
+    "SGDSolver",
+    "pose",
+    "scheduler",
 ]
 
 _EXPORTS: dict[str, tuple[str, str]] = {
     "EMSolver": ("em", "EMSolver"),
-    "FrequencyMarchingScheduler": ("scheduler", "FrequencyMarchingScheduler"),
+    "SGDSolver": ("sgd", "SGDSolver"),
 }
 
 
 def __getattr__(name: str) -> Any:
-    if name == "pose":
-        module = importlib.import_module(f"{__name__}.pose")
+    if name in {"pose", "scheduler"}:
+        module = importlib.import_module(f"{__name__}.{name}")
         globals()[name] = module
         return module
 

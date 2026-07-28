@@ -15,7 +15,9 @@ __all__ = [
     ],
     key=["L", "P"],
 )
-@triton.jit
+# Keep Q as a runtime scalar. Triton may otherwise specialize it into a
+# constexpr/meta parameter, which breaks the explicit tl.int32 cast below.
+@triton.jit(do_not_specialize=["Q"])
 def central_slice_sample_ncdhw_ch2_fwd_kernel(
     input_ptr,
     rotation_ptr,
@@ -177,7 +179,9 @@ def central_slice_sample_ncdhw_ch2_fwd_kernel(
     # polluting the final gradient.
     reset_to_zero=["grad_input_ptr"],
 )
-@triton.jit
+# Keep Q as a runtime scalar. Triton may otherwise specialize it into a
+# constexpr/meta parameter, which breaks the explicit tl.int32 cast below.
+@triton.jit(do_not_specialize=["Q"])
 def central_slice_sample_ncdhw_ch2_bwd_input_kernel(
     grad_output_ptr,
     rotation_ptr,

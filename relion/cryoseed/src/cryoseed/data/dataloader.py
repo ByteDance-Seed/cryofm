@@ -29,6 +29,7 @@ from .dataset import ParticleDataset
 __all__ = [
     "build_dataset",
     "build_dataloader",
+    "build_distributed_dataloader",
     "build_distributed_sampler",
     "split_dataset_in_half",
     "split_dataset_debug",
@@ -45,6 +46,7 @@ def build_dataset(
     star_path: str,
     data_prefix: str = "",
     num_particles: int | None = None,
+    selection_seed: int = 0,
     image_size: int | None = None,
     angpix: float | None = None,
     default_optic_params: dict | None = None,
@@ -56,6 +58,9 @@ def build_dataset(
         star_path (str): Path to the STAR file.
         data_prefix (str, optional): Prefix prepended to MRC/MRCS paths parsed
             from the STAR file. Defaults to ``""``.
+        selection_seed (int, optional): Seed mixed into deterministic
+            pseudo-random subset selection when ``num_particles`` truncates the
+            dataset.
         default_optic_params (dict | None, optional): Fallback values for missing
             optics-level CTF fields.
         default_particle_params (dict | None, optional): Fallback values for missing
@@ -68,6 +73,7 @@ def build_dataset(
         star_path=star_path,
         data_prefix=data_prefix,
         num_particles=num_particles,
+        selection_seed=selection_seed,
         image_size=image_size,
         angpix=angpix,
         default_optic_params=default_optic_params,
@@ -194,6 +200,58 @@ def build_dataloader(
         kwargs["generator"] = generator
 
     return DataLoader(**kwargs)
+
+
+def build_distributed_dataloader(
+    ds: Dataset,
+    *,
+    batch_size: int = 32,
+    shuffle: bool = False,
+    num_workers: int = 4,
+    prefetch_factor: int = 2,
+    persistent_workers: bool = True,
+    device: torch.device | None = None,
+    seed: int = 42,
+    drop_last: bool = True,
+    device_mesh=None,
+) -> tuple[DataLoader, DistributedSampler]:
+    """Build a distributed dataloader and its sampler for a dataset.
+
+    Args:
+        ds: Dataset or subset.
+        batch_size: Batch size.
+        shuffle: Whether the sampler shuffles indices.
+        num_workers: Number of worker processes.
+        prefetch_factor: Prefetch factor when ``num_workers > 0``.
+        persistent_workers: Keep workers alive when ``num_workers > 0``.
+        device: If CUDA, enables ``pin_memory``.
+        seed: RNG seed used by the distributed sampler.
+        drop_last: Whether to drop the last incomplete batch.
+        device_mesh: Device mesh used to infer rank and world size.
+
+    Returns:
+        ``(dataloader, sampler)``.
+    """
+    sampler = build_distributed_sampler(
+        ds,
+        shuffle=shuffle,
+        seed=seed,
+        drop_last=drop_last,
+        device_mesh=device_mesh,
+    )
+    pin_memory = device is not None and device.type == "cuda"
+    dataloader = build_dataloader(
+        ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        prefetch_factor=prefetch_factor,
+        persistent_workers=persistent_workers,
+        pin_memory=pin_memory,
+        sampler=sampler,
+        drop_last=drop_last,
+    )
+    return dataloader, sampler
 
 
 def _get_rank_world_size(device_mesh) -> tuple[int, int]:

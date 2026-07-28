@@ -151,17 +151,17 @@ def run_benchmarks():
         
         # Memory measurement for MSE
         try:
-            mem_torch_mse = measure_peak_memory('mse_torch(input_t, target_t, weight=weight, reduction="sum")', globals_mse, device)
+            mem_torch_mse = measure_peak_memory('mse_torch(input_t, target_t, weight=weight, reduction="sum", spectral_reduction="sum")', globals_mse, device)
         except RuntimeError as e:
             if "out of memory" in str(e).lower():
                 mem_torch_mse = float('inf')
             else:
                 raise e
-        mem_triton_mse = measure_peak_memory('mse_triton(input_t, target_t, weight=weight, reduction="sum")', globals_mse, device)
+        mem_triton_mse = measure_peak_memory('mse_triton(input_t, target_t, weight=weight, reduction="sum", spectral_reduction="sum")', globals_mse, device)
         mem_results.append((sub_label, '3. Weighted spectral MSE', mem_torch_mse, mem_triton_mse))
         
         try:
-            res_torch_mse = benchmark_primitive('mse_torch(input_t, target_t, weight=weight, reduction="sum")', globals_mse, '3. Weighted spectral MSE', sub_label, 'PyTorch')
+            res_torch_mse = benchmark_primitive('mse_torch(input_t, target_t, weight=weight, reduction="sum", spectral_reduction="sum")', globals_mse, '3. Weighted spectral MSE', sub_label, 'PyTorch')
             results.append(res_torch_mse)
         except RuntimeError as e:
             if "out of memory" in str(e).lower():
@@ -169,7 +169,7 @@ def run_benchmarks():
             else:
                 raise e
                 
-        res_triton_mse = benchmark_primitive('mse_triton(input_t, target_t, weight=weight, reduction="sum")', globals_mse, '3. Weighted spectral MSE', sub_label, 'Triton')
+        res_triton_mse = benchmark_primitive('mse_triton(input_t, target_t, weight=weight, reduction="sum", spectral_reduction="sum")', globals_mse, '3. Weighted spectral MSE', sub_label, 'Triton')
         results.append(res_triton_mse)
         
     print("\n" + "="*80)

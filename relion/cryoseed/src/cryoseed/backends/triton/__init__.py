@@ -7,12 +7,14 @@ __all__ = [
     "backproject",
     "primitives",
     "project",
+    "radial_residual_power",
     "spectral_mse_loss",
 ]
 
 _EXPORTS: dict[str, tuple[str, str]] = {
     "backproject": ("backproject", "backproject"),
     "project": ("project", "project"),
+    "radial_residual_power": ("radial_residual_power", "radial_residual_power"),
     "spectral_mse_loss": ("spectral_mse_loss", "spectral_mse_loss"),
 }
 

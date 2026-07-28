@@ -6,12 +6,14 @@ from typing import Any
 __all__ = [
     "EulerPoseSearcher",
     "HEALPixPoseSearcher",
+    "PoseGeometry",
     "PoseSearcher",
 ]
 
 _EXPORTS: dict[str, tuple[str, str]] = {
     "EulerPoseSearcher": ("euler_searcher", "EulerPoseSearcher"),
     "HEALPixPoseSearcher": ("healpix_searcher", "HEALPixPoseSearcher"),
+    "PoseGeometry": ("geometry", "PoseGeometry"),
     "PoseSearcher": ("pose_searcher", "PoseSearcher"),
 }
 

@@ -1,0 +1,120 @@
+io:
+  star_path: ""
+  data_path: ""
+  ref_volume_path: ""
+  output_path: outputs
+  ssd_cache_root: ""
+
+data:
+  batch_size: 4
+  num_workers: 0
+  num_particles: 0
+  image_size: 0
+  angpix: 0.0
+  particle_diameter: null
+  particle_mask:
+    enabled: false
+    zero_mask: true
+    soft_edge_pixels: 5.0
+    protection_disable_epochs: 5
+    protection_radius_factor: 2.628260884878466
+  default_optic_params:
+    voltage_kv: null
+    spherical_aberration_mm: null
+    ctf_bfactor: null
+    ctf_scale: null
+    amplitude_contrast: null
+    phase_shift_deg: null
+  default_particle_params:
+    defocus_u_angstrom: null
+    defocus_v_angstrom: null
+    defocus_angle_deg: null
+
+logging:
+  log_dir: ""
+  log_prefix: cryoseed
+  level: INFO
+
+reconstruction:
+  num_volumes: 1
+  external_reconstruct: false
+  full_backprojection: false
+  backproject_chunk: 16384
+  accumulate_chunk: 16384
+
+statistics:
+  use_noise: true
+  use_prior: true
+  init_variance: 1.0
+  precision_eps: 1.0e-6
+  noise_ema_decay: 0.0
+  noise_prior_weight: 0.0
+  noise_inflated_weight: 0.0
+  noise_inflated_decay: null
+  noise_inflated_scale: 8.0
+  tail_floor: 1.0e-5
+  init_lowpass_cutoff: null
+
+homorefine:
+  num_epochs: 50
+  first_epoch_ncc: true
+  fsc_threshold: 0.143
+  init_lowpass_angstrom: 30
+  solvent_mask: none
+  solvent_mask_soft_edge_pixels: 5.0
+  solvent_fsc_correction: false
+
+scheduler:
+  schedule_check_interval_iters: 100
+  confidence_threshold: 0.1
+  convergence_patience: 3
+  fsc_resolution_improvement_threshold: 5.0e-3
+  fsc_resolution_rebound_threshold: 1.0e-2
+  trans_update_rms_threshold: 0.5
+  pose_translation_center_mode: auto
+  increase_radius_step: 10
+  increase_radius_aggressive_factor: 0.25
+  increase_radius_aggressive_fsc_threshold: 0.2
+  base_healpix_order: 3
+  auto_local_healpix_order: 4
+  auto_local_assignment_change_threshold: 0.05
+  use_cache: false
+  cache_max_healpix_order: 4
+  ssd_cache_min_side_length: 150
+  trans_extent_scale: 3.0
+
+pose_search:
+  init_healpix_order: 2
+  neighbor_steps: 2
+  init_trans_grid_extent: null
+  trans_grid_samples: 5
+  trans_grid_x_shift: 0
+  trans_grid_y_shift: 0
+  pose_chunk_factor: 2560
+  max_candidates: -1
+  criterion_chunk: 8192
+  candidate_select_threshold: 0.999
+  volume_class_similarity: 0.0
+  volume_class_similarity_scope: global
+  oversampling_deduplicate: false
+  ring_averaged_mse: false
+
+reproduce:
+  seed: 42
+  deterministic: false
+
+abinitio:
+  num_epochs: 1000
+  init_particles_per_volume: 100
+  init_lowpass_angstrom: 50
+  solvent_mask: none
+  solvent_mask_soft_edge_pixels: 5.0
+  learning_rate: 1.0
+  learning_rate_decay: 0.9995
+  momentum: 0.9
+  loss_ema_decay: 0.9
+  pose_rms_ema_decay: 0.9
+  target_side_length_resolution: 10.0
+  target_healpix_order: null
+  pose_rotation_stability_factor: 1.0
+  pose_translation_stability_factor: 0.5

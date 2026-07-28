@@ -218,6 +218,14 @@ def log_state(
         return
 
     payload_obj = state.to_dict() if hasattr(state, "to_dict") and callable(getattr(state, "to_dict")) else state
+    if isinstance(payload_obj, dict):
+        payload_obj = dict(payload_obj)
+        progress = payload_obj.get("progress")
+        if isinstance(progress, dict):
+            progress = dict(progress)
+            if progress.get("half") is None:
+                progress.pop("half", None)
+            payload_obj["progress"] = progress
     payload = json.dumps(payload_obj, default=_json_default, ensure_ascii=False, indent=2)
     log_block(logger, title=title, lines=payload.splitlines(), rank0_only=False)
 

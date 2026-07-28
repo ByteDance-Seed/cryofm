@@ -1,5 +1,4 @@
 import os
-import gc
 import time
 import logging
 import torch
@@ -12,8 +11,9 @@ except Exception:
 
 from cryoseed.runtime.distributed import RuntimeContext, is_rank0
 from cryoseed.fft.fft_torch import primal_to_fourier_3d
-from cryoseed.cryoem.mask import lowpass_mask
-from cryoseed.metrics.fsc import calc_fsc, fsc_to_resolution
+from cryoseed.cryoem.mask import lowpass_mask, load_mask_mrc, spherical_mask
+from cryoseed.metrics.fsc import calc_fsc, fsc_to_resolution, apply_fsc_weighting_3d
+from cryoseed.metrics.fsc import calc_solvent_corrected_fsc, SolventCorrectedFSC
 from cryoseed.ops.radial import radial_average
 from cryoseed.config import MainConfig
 from cryoseed.data import (
@@ -36,23 +36,13 @@ from cryoseed.modules.statistics import NoiseVariance, PriorVariance
 from cryoseed.modules.pose import Pose
 from cryoseed.optim.pose import PoseSearcher
 from cryoseed.optim import EMSolver
-from cryoseed.optim import FrequencyMarchingScheduler
-from cryoseed.metrics.fsc import plot_fsc, save_fsc_npz, save_fsc_txt
+from cryoseed.optim.scheduler import HomoRefineScheduler
+from cryoseed.metrics.fsc import plot_fsc, plot_fsc_multiple, save_fsc_npz, save_fsc_txt
 from cryoseed.utils.logging import setup_logging, log_block, log_config, log_state
 from cryoseed.utils.reproducibility import set_seed
 
 
 LOGGER = logging.getLogger(__name__)
-
-def free_cuda(*objs):
-    for o in objs:
-        try:
-            del o
-        except:
-            pass
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
 
 class HomoRefineEngine(torch.nn.Module):
     def __init__(
@@ -65,15 +55,15 @@ class HomoRefineEngine(torch.nn.Module):
         super().__init__()
 
         # config
-        self.config = config
+        self.config = config.validate_for_command("homorefine")
         self.resume_checkpoint_path = resume_checkpoint_path
         self.auto_resume = bool(auto_resume)
         self.runtime = runtime
         self.external_reconstruct_manager = ExternalReconstructManager(runtime=runtime)
-        if int(config.reconstruction.num_volumes) != 1:
+        if int(self.config.reconstruction.num_volumes) != 1:
             raise ValueError(
                 "Refinement requires a single volume (num_volumes must be 1); "
-                f"got num_volumes={int(config.reconstruction.num_volumes)}"
+                f"got num_volumes={int(self.config.reconstruction.num_volumes)}"
             )
 
         # device
@@ -87,6 +77,7 @@ class HomoRefineEngine(torch.nn.Module):
             config.io.star_path,
             data_prefix=config.io.data_path,
             num_particles=config.data.num_particles,
+            selection_seed=int(config.reproduce.seed),
             image_size=config.data.image_size,
             angpix=config.data.angpix,
             default_optic_params=config.data.default_optic_params,
@@ -100,8 +91,8 @@ class HomoRefineEngine(torch.nn.Module):
                 dl_half1,
                 sampler_half0,
                 sampler_half1,
-                idx_half0,
-                idx_half1,
+                _,
+                _,
             ) = build_distributed_half_dataloaders(
                 dataset,
                 batch_size=config.data.batch_size,
@@ -112,7 +103,7 @@ class HomoRefineEngine(torch.nn.Module):
                 device_mesh=device_mesh,
             )
         else:
-            dl_half0, dl_half1, idx_half0, idx_half1 = build_half_dataloaders(
+            dl_half0, dl_half1, _, _ = build_half_dataloaders(
                 dataset,
                 batch_size=config.data.batch_size,
                 shuffle=False,
@@ -137,6 +128,7 @@ class HomoRefineEngine(torch.nn.Module):
 
         self.pose_half0 = Pose.from_config(config, device=device, device_mesh=device_mesh)
         self.pose_half1 = Pose.from_config(config, device=device, device_mesh=device_mesh)
+        self.solvent_mask = self.build_solvent_mask()
 
         # optimization
         self.state = OptimState.from_config(config)
@@ -160,11 +152,13 @@ class HomoRefineEngine(torch.nn.Module):
         )
         self.solver_half0 = EMSolver(state=self.state, pose_searcher=self.pose_searcher_half0, prior=self.prior)
         self.solver_half1 = EMSolver(state=self.state, pose_searcher=self.pose_searcher_half1, prior=self.prior)
-        self.scheduler = FrequencyMarchingScheduler(self.state, device=self.device).from_config(config)
+        self.scheduler = HomoRefineScheduler(self.state, device=self.device).from_config(config)
 
         # placeholder
         self.volume_real_half0 = None
         self.volume_real_half1 = None
+        self.unmasked_volume_real_half0 = None
+        self.unmasked_volume_real_half1 = None
         self._init_lowpass_side_length: int | None = None
         self.register_buffer("_init_lowpass_mask", None, persistent=False)
 
@@ -184,7 +178,12 @@ class HomoRefineEngine(torch.nn.Module):
             raise ValueError(f"Checkpoint is missing a valid `{name}` state.")
 
         required_keys = {"quat", "trans"}
-        optional_keys = {"valid_count"}
+        optional_keys = {
+            "valid_count",
+            "volume_index",
+            "confidence",
+            "volume_class_confidence",
+        }
         state_keys = set(state_dict.keys())
 
         missing_keys = required_keys - state_keys
@@ -261,6 +260,21 @@ class HomoRefineEngine(torch.nn.Module):
             return checkpoint_path, True
         return checkpoint_path, False
 
+    def _sync_execution_flags_from_state(self) -> None:
+        is_last_configured_epoch = (
+            int(self.state.progress.epoch) >= int(self.config.homorefine.num_epochs) - 1
+        )
+        self.state.schedule.is_final_epoch = (
+            bool(self.state.schedule.is_final_epoch) or is_last_configured_epoch
+        )
+        self.state.schedule.full_backprojection = (
+            bool(self.config.reconstruction.full_backprojection)
+            or bool(self.state.schedule.is_final_epoch)
+        )
+        self.state.schedule.skip_external_reconstruct = bool(
+            self.state.schedule.is_final_epoch
+        )
+
     def resume_from_checkpoint(self, checkpoint_path: str) -> None:
         ckpt = torch.load(checkpoint_path, map_location=self.device)
 
@@ -270,10 +284,13 @@ class HomoRefineEngine(torch.nn.Module):
 
         next_epoch = ckpt.get("next_epoch")
         next_schedule = ckpt.get("next_schedule")
+        progress = ckpt.get("progress")
         if next_epoch is None:
             raise ValueError("Checkpoint is missing `next_epoch`.")
         if not isinstance(next_schedule, dict):
             raise ValueError("Checkpoint is missing a valid `next_schedule` section.")
+        if not isinstance(progress, dict):
+            raise ValueError("Checkpoint is missing a valid `progress` section.")
 
         self.volume_half0.load_state_dict(modules["volume_half0"])
         self.volume_half1.load_state_dict(modules["volume_half1"])
@@ -286,9 +303,16 @@ class HomoRefineEngine(torch.nn.Module):
         self._load_optional_module_state(self.noise_half0, modules.get("noise_half0"), "noise_half0")
         self._load_optional_module_state(self.noise_half1, modules.get("noise_half1"), "noise_half1")
         self._load_optional_module_state(self.prior, modules.get("prior"), "prior")
-
         self.state.progress.epoch = int(next_epoch)
         self.state.progress.half = 0
+        self.state.progress.iter = 0
+        self.state.progress.num_epochs_without_resolution_gain = int(
+            progress["num_epochs_without_resolution_gain"]
+        )
+        self.state.progress.num_epochs_with_small_trans_update = int(
+            progress["num_epochs_with_small_trans_update"]
+        )
+        self.state.progress.has_converged = bool(progress["has_converged"])
 
         required_schedule_keys = (
             "pose_search_scope",
@@ -297,27 +321,34 @@ class HomoRefineEngine(torch.nn.Module):
             "oversampling",
             "side_length",
             "trans_grid_extent",
+            "trans_grid_samples",
+            "pose_translation_center_mode",
+            "use_pose_translation_as_center",
+            "use_particle_mask",
+            "particle_mask_extra_diameter_angstrom",
             "proj_cache_backend",
+            "is_final_epoch",
         )
         for key in required_schedule_keys:
             if key not in next_schedule:
                 raise ValueError(f"Checkpoint `next_schedule` is missing `{key}`.")
             setattr(self.state.schedule, key, next_schedule[key])
-        if "full_backprojection" in next_schedule:
-            self.state.schedule.full_backprojection = bool(next_schedule["full_backprojection"])
+        self._sync_execution_flags_from_state()
 
         self.state.metrics.confidence_sum = 0.0
         self.state.metrics.confidence_count = 0
+        self.state.metrics.volume_class_confidence_sum = 0.0
+        self.state.metrics.volume_class_confidence_count = 0
 
         self.pose_searcher_half0.refresh()
         self.pose_searcher_half1.refresh()
 
     def _ensure_init_lowpass_cache(self, volume: torch.Tensor) -> tuple[int, torch.Tensor]:
-        init_lowpass_angstrom = float(self.config.refinement.init_lowpass_angstrom)
+        init_lowpass_angstrom = float(self.config.homorefine.init_lowpass_angstrom)
         if init_lowpass_angstrom <= 0:
             raise ValueError(
-                "refinement.init_lowpass_angstrom must be > 0, got "
-                f"{self.config.refinement.init_lowpass_angstrom}"
+                "homorefine.init_lowpass_angstrom must be > 0, got "
+                f"{self.config.homorefine.init_lowpass_angstrom}"
             )
 
         side_length = 2 * int(
@@ -352,10 +383,7 @@ class HomoRefineEngine(torch.nn.Module):
         init_volume = primal_to_fourier_3d(init_volume_real)
         init_side_length, init_mask = self._ensure_init_lowpass_cache(init_volume)
         self.state.schedule.side_length = init_side_length
-        self.state.schedule.full_backprojection = (
-            bool(self.config.reconstruction.full_backprojection)
-            or int(self.config.refinement.num_epochs) <= 1
-        )
+        self._sync_execution_flags_from_state()
 
         # Volume
         init_volume *= init_mask
@@ -377,10 +405,56 @@ class HomoRefineEngine(torch.nn.Module):
         if self.prior is not None:
             self.prior.from_volume(init_volume)
 
+    def snapshot_unmasked_halfmaps(self) -> None:
+        if self.volume_real_half0 is None or self.volume_real_half1 is None:
+            raise RuntimeError("half-maps are unavailable for unmasked snapshot")
+        self.unmasked_volume_real_half0 = self.volume_real_half0.detach().clone()
+        self.unmasked_volume_real_half1 = self.volume_real_half1.detach().clone()
+
+    def build_solvent_mask(self) -> torch.Tensor | None:
+        selector = str(self.config.homorefine.solvent_mask).strip()
+        mode = selector.lower()
+
+        if os.path.isfile(selector):
+            return load_mask_mrc(
+                selector,
+                side_length=int(self.config.data.image_size),
+                angpix=float(self.config.data.angpix),
+                device=self.device,
+            )
+        if mode == "none":
+            if self.config.homorefine.solvent_fsc_correction:
+                raise ValueError(
+                    "homorefine.solvent_fsc_correction requires a solvent mask"
+                )
+            return None
+        if mode == "sphere":
+            particle_diameter = self.config.data.particle_diameter
+            if particle_diameter is None or float(particle_diameter) <= 0:
+                raise ValueError(
+                    "data.particle_diameter must be positive for a spherical solvent mask"
+                )
+            angpix = float(self.config.data.angpix)
+            if angpix <= 0:
+                raise ValueError(f"angpix must be positive, got {angpix}")
+            return spherical_mask(
+                int(self.config.data.image_size),
+                int(self.config.data.image_size),
+                int(self.config.data.image_size),
+                radius=float(particle_diameter) / (2.0 * angpix),
+                soft_edge_pixels=float(
+                    self.config.homorefine.solvent_mask_soft_edge_pixels
+                ),
+                device=self.device,
+            ).to(dtype=torch.float32)
+        if mode == "auto":
+            raise NotImplementedError("automatic solvent masking is not implemented yet")
+        raise FileNotFoundError(f"solvent mask does not exist: {selector}")
+
     def preprocess(self, batch: DataBatch):
-        # solvent mask
         # norm correction
         # real-space mask
+        del batch
         return
 
     @torch.no_grad()
@@ -397,15 +471,119 @@ class HomoRefineEngine(torch.nn.Module):
         self.volume_half0.load_volume(volume_half0)
         self.volume_half1.load_volume(volume_half1)
 
-    def evaluate(self):
-        vol0 = self.volume_real_half0.squeeze(0).detach().cpu().numpy()
-        vol1 = self.volume_real_half1.squeeze(0).detach().cpu().numpy()
+    @torch.no_grad()
+    def apply_solvent_mask(self) -> torch.Tensor | None:
+        if self.solvent_mask is None:
+            self.volume_real_half0 = self.unmasked_volume_real_half0
+            self.volume_real_half1 = self.unmasked_volume_real_half1
+            return None
+        if (
+            self.unmasked_volume_real_half0 is None
+            or self.unmasked_volume_real_half1 is None
+        ):
+            raise RuntimeError("unmasked half-maps must be available before masking")
 
-        fsc_scores_np, fsc_freqs_np = calc_fsc(vol0, vol1)
+        mask = self.solvent_mask.unsqueeze(0)
+        masked_real_volumes: list[torch.Tensor] = []
+        for volume, unmasked_volume_real in (
+            (self.volume_half0, self.unmasked_volume_real_half0),
+            (self.volume_half1, self.unmasked_volume_real_half1),
+        ):
+            if unmasked_volume_real is None:
+                raise RuntimeError("reference volume is unavailable for solvent masking")
+            # Apply the real-space mask, then copy the updated Fourier reference in place.
+            masked_real = unmasked_volume_real * mask
+            volume.copy_volume_(primal_to_fourier_3d(masked_real))
+            masked_real_volumes.append(masked_real)
+        self.volume_real_half0, self.volume_real_half1 = masked_real_volumes
+        return self.solvent_mask
+
+    def _calc_halfmap_fsc(self, volume_real_half0: torch.Tensor, volume_real_half1: torch.Tensor):
+        fsc_scores, fsc_freqs = calc_fsc(
+            volume_real_half0.squeeze(0),
+            volume_real_half1.squeeze(0),
+        )
         fsc_resol = fsc_to_resolution(
-            fsc_scores_np,
-            fsc_freqs_np,
-            self.config.refinement.fsc_threshold,
+            fsc_scores,
+            fsc_freqs,
+            self.config.homorefine.fsc_threshold,
+            self.config.data.angpix,
+        )
+        return fsc_scores, fsc_freqs, fsc_resol
+
+    def _truncate_fsc_to_current_side_length(self, fsc_scores: torch.Tensor | None) -> torch.Tensor | None:
+        if fsc_scores is None:
+            return None
+        fsc = torch.as_tensor(fsc_scores, device=self.device).reshape(-1).clone()
+        valid_shells = max(0, int(self.state.schedule.side_length) // 2)
+        if valid_shells < int(fsc.numel()):
+            fsc[valid_shells:] = 0
+        return fsc
+
+    def _truncate_solvent_corrected_fsc_to_current_side_length(
+        self,
+        correction: SolventCorrectedFSC,
+    ) -> SolventCorrectedFSC:
+        return SolventCorrectedFSC(
+            fsc_freqs=correction.fsc_freqs,
+            corrected=self._truncate_fsc_to_current_side_length(correction.corrected),
+            unmasked=self._truncate_fsc_to_current_side_length(correction.unmasked),
+            masked=self._truncate_fsc_to_current_side_length(correction.masked),
+            randomized_masked=self._truncate_fsc_to_current_side_length(
+                correction.randomized_masked
+            ),
+            phase_randomization_frequency=correction.phase_randomization_frequency,
+        )
+
+    @torch.no_grad()
+    def _accumulate_confidence_metrics_from_pose(self, pose: Pose) -> None:
+        if self.state.schedule.pose_search_criterion != "posterior":
+            return
+        valid_count = int(pose.valid_count.sum().item())
+        if valid_count <= 0:
+            return
+        self.state.metrics.confidence_sum += (
+            float(pose.avg_confidence.item()) * valid_count
+        )
+        self.state.metrics.confidence_count += valid_count
+        self.state.metrics.volume_class_confidence_sum += (
+            float(pose.avg_volume_class_confidence.item()) * valid_count
+        )
+        self.state.metrics.volume_class_confidence_count += valid_count
+
+    def evaluate(self):
+        volume_real_half0 = self.volume_real_half0
+        volume_real_half1 = self.volume_real_half1
+        if volume_real_half0 is None or volume_real_half1 is None:
+            raise RuntimeError("half-maps are unavailable for FSC evaluation")
+
+        correction = None
+        if self.config.homorefine.solvent_fsc_correction:
+            if (
+                self.solvent_mask is None
+                or self.unmasked_volume_real_half0 is None
+                or self.unmasked_volume_real_half1 is None
+            ):
+                raise RuntimeError("solvent FSC correction requires a solvent mask")
+            correction = calc_solvent_corrected_fsc(
+                self.unmasked_volume_real_half0.squeeze(0),
+                self.unmasked_volume_real_half1.squeeze(0),
+                self.solvent_mask,
+                seed=int(self.config.reproduce.seed) + 2 * int(self.state.progress.epoch),
+            )
+            correction = self._truncate_solvent_corrected_fsc_to_current_side_length(correction)
+            fsc_scores = correction.corrected
+            fsc_freqs = correction.fsc_freqs
+        else:
+            fsc_scores, fsc_freqs, _ = self._calc_halfmap_fsc(
+                volume_real_half0,
+                volume_real_half1,
+            )
+            fsc_scores = self._truncate_fsc_to_current_side_length(fsc_scores)
+        fsc_resol = fsc_to_resolution(
+            fsc_scores,
+            fsc_freqs,
+            self.config.homorefine.fsc_threshold,
             self.config.data.angpix,
         )
         prev_fsc_resolution = self.state.metrics.fsc_resolution
@@ -415,40 +593,83 @@ class HomoRefineEngine(torch.nn.Module):
             fsc_resolution_change = float(fsc_resol) - float(prev_fsc_resolution)
 
         self.state.metrics.fsc_scores = torch.as_tensor(
-            fsc_scores_np,
+            fsc_scores,
             dtype=torch.float32,
             device=self.device,
         )
         self.state.metrics.fsc_resolution = float(fsc_resol)
         self.state.metrics.fsc_resolution_change = fsc_resolution_change
+        self.state.metrics.rot_update_rms = 0.5 * (
+            float(self.pose_half0.rot_update_rms.item())
+            + float(self.pose_half1.rot_update_rms.item())
+        )
         self.state.metrics.trans_update_rms = 0.5 * (
             float(self.pose_half0.trans_update_rms.item())
             + float(self.pose_half1.trans_update_rms.item())
         )
+        self._accumulate_confidence_metrics_from_pose(self.pose_half0)
+        self._accumulate_confidence_metrics_from_pose(self.pose_half1)
 
         epoch = self.state.progress.epoch
         output_fsc_path = os.path.join(self.config.io.output_path, "fsc", f"epoch_{epoch:03d}")
         os.makedirs(output_fsc_path, exist_ok=True)
-        plot_fsc(
-            fsc_scores_np,
-            fsc_freqs_np,
-            threshold=self.config.refinement.fsc_threshold,
-            voxel_size=self.config.data.angpix,
-            save_path=os.path.join(output_fsc_path, "fsc.png"),
-        )
+        fsc_plot_path = os.path.join(output_fsc_path, "fsc.png")
+        if correction is None:
+            plot_fsc(
+                fsc_scores,
+                fsc_freqs,
+                threshold=self.config.homorefine.fsc_threshold,
+                angpix=self.config.data.angpix,
+                save_path=fsc_plot_path,
+                color="tab:blue",
+            )
+        else:
+            fsc_curves = [correction.unmasked, correction.masked]
+            fsc_labels = ["unmasked", "masked"]
+            fsc_colors = ["tab:blue", "tab:orange"]
+            if correction.randomized_masked is not None:
+                fsc_curves.append(correction.randomized_masked)
+                fsc_labels.append("randomized")
+                fsc_colors.append("tab:gray")
+            fsc_curves.append(correction.corrected)
+            fsc_labels.append("corrected")
+            fsc_colors.append("tab:purple")
+            plot_fsc_multiple(
+                fsc_curves,
+                fsc_freqs,
+                labels=fsc_labels,
+                threshold=self.config.homorefine.fsc_threshold,
+                angpix=self.config.data.angpix,
+                save_path=fsc_plot_path,
+                colors=fsc_colors,
+            )
         save_fsc_npz(
             os.path.join(output_fsc_path, "fsc.npz"),
-            fsc_freqs_np,
-            fsc_scores_np,
-            iter_=epoch,
+            fsc_freqs,
+            fsc_scores,
+            epoch=epoch,
             resolution=fsc_resol,
+            fsc_unmasked=None if correction is None else correction.unmasked,
+            fsc_masked=None if correction is None else correction.masked,
+            fsc_randomized_masked=None if correction is None else correction.randomized_masked,
+            fsc_corrected=None if correction is None else correction.corrected,
+            phase_randomization_frequency=None
+            if correction is None
+            else correction.phase_randomization_frequency,
         )
         save_fsc_txt(
             os.path.join(output_fsc_path, "fsc.txt"),
-            fsc_freqs_np,
-            fsc_scores_np,
-            iter_=epoch,
+            fsc_freqs,
+            fsc_scores,
+            epoch=epoch,
             resolution=fsc_resol,
+            fsc_unmasked=None if correction is None else correction.unmasked,
+            fsc_masked=None if correction is None else correction.masked,
+            fsc_randomized_masked=None if correction is None else correction.randomized_masked,
+            fsc_corrected=None if correction is None else correction.corrected,
+            phase_randomization_frequency=None
+            if correction is None
+            else correction.phase_randomization_frequency,
         )
  
     def update_prior(self):
@@ -497,9 +718,9 @@ class HomoRefineEngine(torch.nn.Module):
             device=self.device,
         )
 
-    def _external_reconstruct_fsc(self, num_shells: int) -> torch.Tensor:
-        """Match the saved FSC vector to the number of exported spectral shells."""
-        fsc = torch.as_tensor(self.state.metrics.fsc_scores, dtype=torch.float32, device=self.device).reshape(-1)
+    def _external_reconstruct_fsc(self, fsc_scores, num_shells: int) -> torch.Tensor:
+        """Match a half-map FSC vector to the number of exported spectral shells."""
+        fsc = torch.as_tensor(fsc_scores, dtype=torch.float32, device=self.device).reshape(-1)
         if int(fsc.numel()) == num_shells - 1:
             # Prepend the DC shell when the measured FSC starts from the first non-zero frequency.
             fsc = torch.cat((fsc.new_tensor([1.0]), fsc), dim=0)
@@ -526,6 +747,7 @@ class HomoRefineEngine(torch.nn.Module):
         half_index: int,
         volume: VoxelGrid,
         volume_real: torch.Tensor,
+        fsc: torch.Tensor,
     ) -> ExternalReconstructLayout:
         """Export one half-map state to disk for external reconstruction."""
         def as_single_volume(tensor: torch.Tensor, name: str) -> torch.Tensor:
@@ -575,7 +797,7 @@ class HomoRefineEngine(torch.nn.Module):
                 pixel_size=float(self.config.data.angpix),
                 particle_diameter=float(self.config.data.particle_diameter),
                 prior_variance=prior_variance,
-                fsc=self._external_reconstruct_fsc(int(prior_variance.numel())),
+                fsc=fsc,
             )
         return paths
 
@@ -585,29 +807,42 @@ class HomoRefineEngine(torch.nn.Module):
         volume: VoxelGrid,
         result_path: str,
     ) -> torch.Tensor:
-        """Reload the external result while preserving accumulation buffers."""
+        """Reload the external result by copying the Fourier volume in place."""
         volume_real = self._load_external_reconstruct_result(result_path)
-        accum_numer = volume.accum_numer
-        accum_denom = volume.accum_denom
-        volume.load_volume(primal_to_fourier_3d(volume_real))
-        volume.accum_numer = accum_numer
-        volume.accum_denom = accum_denom
+        volume.copy_volume_(primal_to_fourier_3d(volume_real))
         return volume_real
 
     def external_reconstruct(self) -> None:
         """Run the optional external reconstruction bridge for both half maps."""
         if not bool(self.config.reconstruction.external_reconstruct):
             return
+        if (
+            self.unmasked_volume_real_half0 is None
+            or self.unmasked_volume_real_half1 is None
+        ):
+            raise RuntimeError("unmasked half-maps are unavailable for external reconstruction")
+
+        external_fsc_scores, _, _ = self._calc_halfmap_fsc(
+            self.unmasked_volume_real_half0,
+            self.unmasked_volume_real_half1,
+        )
+        external_prior_variance = self._external_prior_variance()
+        external_fsc = self._external_reconstruct_fsc(
+            external_fsc_scores,
+            int(external_prior_variance.numel()),
+        )
 
         half0_paths = self._prepare_external_reconstruct_half(
             half_index=0,
             volume=self.volume_half0,
-            volume_real=self.volume_real_half0,
+            volume_real=self.unmasked_volume_real_half0,
+            fsc=external_fsc,
         )
         half1_paths = self._prepare_external_reconstruct_half(
             half_index=1,
             volume=self.volume_half1,
-            volume_real=self.volume_real_half1,
+            volume_real=self.unmasked_volume_real_half1,
+            fsc=external_fsc,
         )
 
         jobs = [
@@ -627,12 +862,21 @@ class HomoRefineEngine(torch.nn.Module):
             volume=self.volume_half1,
             result_path=half1_paths.result,
         )
+        self.snapshot_unmasked_halfmaps()
 
     def save_result(self):
         if not is_rank0():
             return None
 
         epoch = self.state.progress.epoch
+        if self.volume_real_half0 is None or self.volume_real_half1 is None:
+            raise RuntimeError("working half-maps are unavailable for saving")
+        if (
+            self.unmasked_volume_real_half0 is None
+            or self.unmasked_volume_real_half1 is None
+        ):
+            raise RuntimeError("unmasked half-maps are unavailable for saving")
+
         output_checkpoints_root = os.path.join(self.config.io.output_path, "checkpoints")
         output_checkpoint_path = os.path.join(self.config.io.output_path, "checkpoints", f"epoch_{epoch:03d}")
         output_map_path = os.path.join(self.config.io.output_path, "maps", f"epoch_{epoch:03d}")
@@ -652,6 +896,11 @@ class HomoRefineEngine(torch.nn.Module):
 
             "pose_searcher_half0": self.pose_searcher_half0.state_dict(),
             "pose_searcher_half1": self.pose_searcher_half1.state_dict(),
+            "progress": {
+                "num_epochs_without_resolution_gain": self.state.progress.num_epochs_without_resolution_gain,
+                "num_epochs_with_small_trans_update": self.state.progress.num_epochs_with_small_trans_update,
+                "has_converged": self.state.progress.has_converged,
+            },
 
             "next_epoch": epoch + 1,
             "next_schedule":{
@@ -661,8 +910,13 @@ class HomoRefineEngine(torch.nn.Module):
                 "oversampling": self.state.schedule.oversampling,
                 "side_length": self.state.schedule.side_length,
                 "trans_grid_extent": self.state.schedule.trans_grid_extent,
+                "trans_grid_samples": self.state.schedule.trans_grid_samples,
+                "pose_translation_center_mode": self.state.schedule.pose_translation_center_mode,
+                "use_pose_translation_as_center": self.state.schedule.use_pose_translation_as_center,
+                "use_particle_mask": self.state.schedule.use_particle_mask,
+                "particle_mask_extra_diameter_angstrom": self.state.schedule.particle_mask_extra_diameter_angstrom,
                 "proj_cache_backend": self.state.schedule.proj_cache_backend,
-                "full_backprojection": self.state.schedule.full_backprojection,
+                "is_final_epoch": self.state.schedule.is_final_epoch,
             }
         }
 
@@ -679,19 +933,49 @@ class HomoRefineEngine(torch.nn.Module):
             "latest_checkpoint_path": latest_checkpoint_path,
         }
 
-        save_mrc(file_path=os.path.join(output_map_path, f"epoch_{epoch:03d}_half0.mrc"),
+        save_mrc(file_path=os.path.join(output_map_path, f"epoch_{epoch:03d}_half0_masked.mrc"),
                 data=self.volume_real_half0.squeeze(0),
                 voxel_size=self.config.data.angpix)
 
-        save_mrc(file_path=os.path.join(output_map_path, f"epoch_{epoch:03d}_half1.mrc"),
+        save_mrc(file_path=os.path.join(output_map_path, f"epoch_{epoch:03d}_half1_masked.mrc"),
                 data=self.volume_real_half1.squeeze(0),
                 voxel_size=self.config.data.angpix)
 
-        volume_real = (self.volume_real_half0 + self.volume_real_half1) * 0.5
+        save_mrc(
+            file_path=os.path.join(output_map_path, f"epoch_{epoch:03d}_half0_unmasked.mrc"),
+            data=self.unmasked_volume_real_half0.squeeze(0),
+            voxel_size=self.config.data.angpix,
+        )
 
-        save_mrc(file_path=os.path.join(output_map_path, f"epoch_{epoch:03d}_volume.mrc"),
-                data=volume_real.squeeze(0),
+        save_mrc(
+            file_path=os.path.join(output_map_path, f"epoch_{epoch:03d}_half1_unmasked.mrc"),
+            data=self.unmasked_volume_real_half1.squeeze(0),
+            voxel_size=self.config.data.angpix,
+        )
+
+        volume_real_avg = (
+            self.unmasked_volume_real_half0 + self.unmasked_volume_real_half1
+        ) * 0.5
+        volume_real_weighting = (self.volume_real_half0 + self.volume_real_half1) * 0.5
+        volume_real_weighted = apply_fsc_weighting_3d(
+            volume_real_weighting.squeeze(0),
+            self.state.metrics.fsc_scores,
+        ).unsqueeze(0)
+
+        save_mrc(file_path=os.path.join(output_map_path, f"epoch_{epoch:03d}_volume_unmasked.mrc"),
+                data=volume_real_avg.squeeze(0),
                 voxel_size=self.config.data.angpix)
+
+        save_mrc(file_path=os.path.join(output_map_path, f"epoch_{epoch:03d}_volume_masked_weighted.mrc"),
+                data=volume_real_weighted.squeeze(0),
+                voxel_size=self.config.data.angpix)
+
+        if self.solvent_mask is not None:
+            save_mrc(
+                file_path=os.path.join(output_map_path, f"epoch_{epoch:03d}_solvent_mask.mrc"),
+                data=self.solvent_mask.to(dtype=torch.float32),
+                voxel_size=self.config.data.angpix,
+            )
 
         return checkpoint_paths
 
@@ -744,17 +1028,23 @@ class HomoRefineEngine(torch.nn.Module):
             else:
                 logger.info("Initialization finished | time=%.3fs", init_wall)
 
-            if start_epoch >= int(self.config.refinement.num_epochs):
+            if start_epoch >= int(self.config.homorefine.num_epochs):
                 logger.warning(
                     "No epochs to run after resume: start_epoch=%d, num_epochs=%d",
                     start_epoch,
-                    int(self.config.refinement.num_epochs),
+                    int(self.config.homorefine.num_epochs),
                 )
                 return
 
+            completed_via_convergence_final_epoch = False
+
             # loop
-            for epoch in range(start_epoch, self.config.refinement.num_epochs):
+            for epoch in range(start_epoch, self.config.homorefine.num_epochs):
                 self.state.progress.epoch = epoch
+                current_is_final_epoch = bool(self.state.schedule.is_final_epoch)
+                current_is_convergence_final_epoch = (
+                    current_is_final_epoch and self.state.progress.has_converged
+                )
 
                 if self.device.type == "cuda":
                     torch.cuda.synchronize(self.device)
@@ -773,6 +1063,7 @@ class HomoRefineEngine(torch.nn.Module):
 
                 logger.info("Epoch %d Half 0 started", epoch)
                 self.state.progress.half = 0
+                self.state.progress.iter = 0
                 log_state(logger, self.state, title=f"Epoch {epoch} Half 0 State")
                 if self.sampler_half0 is not None:
                     self.sampler_half0.set_epoch(epoch)
@@ -786,6 +1077,7 @@ class HomoRefineEngine(torch.nn.Module):
                     batch = batch.to(self.device, non_blocking=True)
                     result = self.solver_half0.infer(batch)
                     self.solver_half0.accumulate(result)
+                    self.state.progress.iter += 1
 
                 self.solver_half0.update()
 
@@ -805,6 +1097,7 @@ class HomoRefineEngine(torch.nn.Module):
 
                 logger.info("Epoch %d Half 1 started", epoch)
                 self.state.progress.half = 1
+                self.state.progress.iter = 0
                 log_state(logger, self.state, title=f"Epoch {epoch} Half 1 State")
                 if self.sampler_half1 is not None:
                     self.sampler_half1.set_epoch(epoch)
@@ -818,6 +1111,7 @@ class HomoRefineEngine(torch.nn.Module):
                     batch = batch.to(self.device, non_blocking=True)
                     result = self.solver_half1.infer(batch)
                     self.solver_half1.accumulate(result)
+                    self.state.progress.iter += 1
 
                 self.solver_half1.update()
 
@@ -830,36 +1124,59 @@ class HomoRefineEngine(torch.nn.Module):
                     half1_wall,
                 )
 
-                # real-domain volume
+                # Current-epoch state conventions:
+                # - unmasked_volume_real_half* stores the external-reconstructed,
+                #   pre-mask real-space state.
+                # - volume_real_half* stores the final working real-space state
+                #   after optional solvent masking.
                 self.volume_real_half0 = self.volume_half0.volume_real
                 self.volume_real_half1 = self.volume_half1.volume_real
+                self.snapshot_unmasked_halfmaps()
+
+                # optional external reconstruction
+                if self.state.schedule.skip_external_reconstruct:
+                    logger.info(
+                        "Epoch %d skipping external reconstruction during final epoch",
+                        epoch,
+                    )
+                else:
+                    self.external_reconstruct()
+
+                # optional solvent masking
+                self.apply_solvent_mask()
 
                 # half-map fsc
                 self.evaluate()
-
-                # external reconstruction
-                self.external_reconstruct()
 
                 # update prior
                 self.update_prior()
 
                 # epoch summary
                 if is_rank0():
+                    rot_rms_deg = torch.rad2deg(
+                        torch.tensor(self.state.metrics.rot_update_rms)
+                    ).item()
                     log_block(
                         logger,
                         title=f"Epoch {epoch} Summary",
                         lines=[
-                            f"Pose Search : L={self.state.schedule.side_length}, healpix={self.state.schedule.healpix_order}, oversampling={self.state.schedule.oversampling}, trans_extent={self.state.schedule.trans_grid_extent:.2f}",
+                            f"Pose Search : L={self.state.schedule.side_length}, healpix={self.state.schedule.healpix_order}, oversampling={self.state.schedule.oversampling}, trans_extent={self.state.schedule.trans_grid_extent:.2f}, criterion={self.state.schedule.pose_search_criterion}",
+                            f"Particle Mask: enabled={self.state.schedule.use_particle_mask}, extra_diameter={self.state.schedule.particle_mask_extra_diameter_angstrom:.2f} A",
                             f"Backproject : full_bp={self.state.schedule.full_backprojection}",
                             f"Resolution  : {float(self.state.metrics.fsc_resolution):.2f} Angstrom",
-                            f"Trans RMS   : {self.state.metrics.trans_update_rms:.2e}",
-                            f"Confidence  : {self.state.metrics.avg_confidence:.2e}",
+                            f"Confidence  : {100.0 * float(self.state.metrics.avg_confidence):.2f}%",
+                            f"Rot RMS     : {rot_rms_deg:.2f} deg",
+                            f"Trans RMS   : {self.state.metrics.trans_update_rms:.2f} px",
                         ],
                     )
 
                 self.scheduler.step()
 
-                if self.state.progress.has_converged and is_rank0():
+                if (
+                    self.state.progress.has_converged
+                    and is_rank0()
+                    and not current_is_final_epoch
+                ):
                     log_block(
                         logger,
                         title=f"Converged At Epoch {epoch}",
@@ -871,22 +1188,28 @@ class HomoRefineEngine(torch.nn.Module):
                             f"(resolution={float(self.state.metrics.fsc_resolution):.4f} A)",
                             "translation update RMS has stayed below threshold for "
                             f"{self.state.progress.num_epochs_with_small_trans_update} consecutive epochs "
-                            f"(trans_rms={self.state.metrics.trans_update_rms:.4f} px, "
-                            f"threshold={self.config.scheduler.trans_update_rms_threshold:.4f} px)",
+                            f"(trans_rms={self.state.metrics.trans_update_rms:.2f} px, "
+                            f"threshold={self.config.scheduler.trans_update_rms_threshold:.2f} px)",
                         ],
                     )
 
                 # next epoch plan
-                if is_rank0() and not self.state.progress.has_converged:
+                if (
+                    is_rank0()
+                    and (epoch + 1 < int(self.config.homorefine.num_epochs))
+                    and not current_is_final_epoch
+                ):
                     log_block(
                         logger,
                         title=f"Next Epoch Configuration (Epoch {epoch+1})",
                         lines=[
-                            f"Pose Search : L={self.state.schedule.side_length}, healpix={self.state.schedule.healpix_order}, oversampling={self.state.schedule.oversampling}, trans_extent={self.state.schedule.trans_grid_extent:.2f}",
-                            f"Backproject : full_bp={self.state.schedule.full_backprojection}",
+                            f"Pose Search : L={self.state.schedule.side_length}, healpix={self.state.schedule.healpix_order}, oversampling={self.state.schedule.oversampling}, trans_extent={self.state.schedule.trans_grid_extent:.2f}, criterion={self.state.schedule.pose_search_criterion}",
                             f"Scope       : {self.state.schedule.pose_search_scope}",
                             f"Strategy    : {self.state.schedule.pose_search_strategy}",
                             f"Cache       : {self.state.schedule.proj_cache_backend}",
+                            f"Particle Mask: enabled={self.state.schedule.use_particle_mask}, extra_diameter={self.state.schedule.particle_mask_extra_diameter_angstrom:.2f} A",
+                            f"Backproject : full_bp={self.state.schedule.full_backprojection}",
+                            f"Final Epoch : {self.state.schedule.is_final_epoch}",
                         ],
                     )
 
@@ -911,26 +1234,38 @@ class HomoRefineEngine(torch.nn.Module):
                     half1_wall,
                 )
 
-                if self.state.progress.has_converged:
+                if current_is_final_epoch:
+                    completed_via_convergence_final_epoch = current_is_convergence_final_epoch
+                    if current_is_convergence_final_epoch and is_rank0():
+                        log_block(
+                            logger,
+                            title="Refinement Completed",
+                            lines=[
+                                "Completed after convergence-triggered final epoch",
+                                f"Final resolution : {float(self.state.metrics.fsc_resolution):.4f} Angstrom",
+                            ],
+                        )
+                    break
+
+                if self.state.progress.has_converged and self.state.schedule.is_final_epoch:
                     logger.info(
-                        "Refinement stopped early at epoch %d | reason=%s",
+                        "Refinement entering final epoch after epoch %d | reason=%s",
                         epoch,
                         "convergence conditions satisfied: FSC has shown no meaningful gain for "
                         f"{self.state.progress.num_epochs_without_resolution_gain} consecutive epochs "
                         f"(resolution={float(self.state.metrics.fsc_resolution):.4f} A), "
                         "translation update RMS has stayed below threshold for "
                         f"{self.state.progress.num_epochs_with_small_trans_update} consecutive epochs "
-                        f"(trans_rms={self.state.metrics.trans_update_rms:.4f} px, "
-                        f"threshold={self.config.scheduler.trans_update_rms_threshold:.4f} px)",
+                        f"(trans_rms={self.state.metrics.trans_update_rms:.2f} px, "
+                        f"threshold={self.config.scheduler.trans_update_rms_threshold:.2f} px)",
                     )
-                    break
 
-            if not self.state.progress.has_converged and is_rank0():
+            if not completed_via_convergence_final_epoch and is_rank0():
                 log_block(
                     logger,
                     title="Refinement Completed",
                     lines=[
-                        f"Completed all {int(self.config.refinement.num_epochs)} epochs",
+                        f"Completed all {int(self.config.homorefine.num_epochs)} epochs",
                         f"Final resolution : {float(self.state.metrics.fsc_resolution):.4f} Angstrom",
                     ],
                 )

@@ -33,10 +33,10 @@ def weighted_sqdiff_sum_indexed_cplx_fwd_kernel(
     y_stride0: tl.constexpr, y_stride1: tl.constexpr, y_stride2: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
-    i = tl.program_id(0)
+    i = tl.program_id(0).to(tl.int64)
 
-    xi = tl.load(x_idx_ptr + i).to(tl.int32)
-    yi = tl.load(y_idx_ptr + i).to(tl.int32)
+    xi = tl.load(x_idx_ptr + i).to(tl.int64)
+    yi = tl.load(y_idx_ptr + i).to(tl.int64)
 
     x_base = x_ri_ptr + xi * x_stride0
     y_base = y_ri_ptr + yi * y_stride0
@@ -72,11 +72,11 @@ def weighted_sqdiff_sum_indexed_cplx_partial_fwd_kernel(
     p_stride0: tl.constexpr, p_stride1: tl.constexpr,
     BLOCK_D: tl.constexpr,       # FIXED for 2-stage
 ):
-    i = tl.program_id(0)
+    i = tl.program_id(0).to(tl.int64)
     p = tl.program_id(1)
 
-    xi = tl.load(x_idx_ptr + i).to(tl.int32)
-    yi = tl.load(y_idx_ptr + i).to(tl.int32)
+    xi = tl.load(x_idx_ptr + i).to(tl.int64)
+    yi = tl.load(y_idx_ptr + i).to(tl.int64)
 
     x_base = x_ri_ptr + xi * x_stride0
     y_base = y_ri_ptr + yi * y_stride0
@@ -105,7 +105,7 @@ def weighted_sqdiff_sum_indexed_partial_reduce_fwd_kernel(
     p_stride0: tl.constexpr, p_stride1: tl.constexpr,
     BLOCK_P: tl.constexpr,
 ):
-    i = tl.program_id(0)
+    i = tl.program_id(0).to(tl.int64)
     offs = tl.arange(0, BLOCK_P)
     acc = tl.zeros((BLOCK_P,), dtype=tl.float32)
 
@@ -142,11 +142,11 @@ def weighted_sqdiff_sum_indexed_cplx_bwd_input_other_kernel(
     HAS_GRAD_Y: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
-    i = tl.program_id(0)
+    i = tl.program_id(0).to(tl.int64)
     p = tl.program_id(1)
 
-    xi = tl.load(x_idx_ptr + i).to(tl.int32)
-    yi = tl.load(y_idx_ptr + i).to(tl.int32)
+    xi = tl.load(x_idx_ptr + i).to(tl.int64)
+    yi = tl.load(y_idx_ptr + i).to(tl.int64)
 
     x_base = x_ri_ptr + xi * x_stride0
     y_base = y_ri_ptr + yi * y_stride0
@@ -197,11 +197,11 @@ def weighted_sqdiff_sum_indexed_cplx_bwd_weight_kernel(
     y_stride0: tl.constexpr, y_stride1: tl.constexpr, y_stride2: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
-    i = tl.program_id(0)
+    i = tl.program_id(0).to(tl.int64)
     p = tl.program_id(1)
 
-    xi = tl.load(x_idx_ptr + i).to(tl.int32)
-    yi = tl.load(y_idx_ptr + i).to(tl.int32)
+    xi = tl.load(x_idx_ptr + i).to(tl.int64)
+    yi = tl.load(y_idx_ptr + i).to(tl.int64)
 
     x_base = x_ri_ptr + xi * x_stride0
     y_base = y_ri_ptr + yi * y_stride0

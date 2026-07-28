@@ -21,6 +21,7 @@ __all__ = [
     "data_collate_fn",
     "build_dataset",
     "build_dataloader",
+    "build_distributed_dataloader",
     "build_distributed_sampler",
     "split_dataset_in_half",
     "split_dataset_debug",
@@ -43,6 +44,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "data_collate_fn": ("collate", "data_collate_fn"),
     "build_dataloader": ("dataloader", "build_dataloader"),
     "build_dataset": ("dataloader", "build_dataset"),
+    "build_distributed_dataloader": ("dataloader", "build_distributed_dataloader"),
     "build_debug_distributed_half_dataloaders": (
         "dataloader",
         "build_debug_distributed_half_dataloaders",

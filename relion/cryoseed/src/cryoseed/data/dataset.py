@@ -11,6 +11,7 @@ that pose and CTF metadata can travel alongside the image. Batching is handled
 by :func:`cryoseed.data.data_collate_fn`.
 """
 
+import hashlib
 import os
 
 import numpy as np
@@ -34,37 +35,70 @@ from cryoseed.ops.transforms import downsample2d
 __all__ = ["ParticleDataset"]
 
 
-OPTIC_PARAM_KEY_ALIASES: dict[str, str] = {
-    "kV": "voltage_kv",
-    "Cs": "spherical_aberration_mm",
-    "Bfac": "bfactor",
-    "scale": "ctf_scale",
-    "Q0": "amplitude_contrast",
-    "phase_shift": "phase_shift_deg",
-}
-
-PARTICLE_PARAM_KEY_ALIASES: dict[str, str] = {
-    "DeltafU": "defocus_u_angstrom",
-    "DeltafV": "defocus_v_angstrom",
-    "azimuthal_angle": "defocus_angle_deg",
-}
-
-
 def _normalize_param_keys(
     params: dict | None,
-    aliases: dict[str, str],
     preferred_keys: list[str],
 ) -> dict[str, object]:
     normalized = dict(params or {})
-    for old_key, new_key in aliases.items():
-        if old_key in normalized and new_key not in normalized:
-            normalized[new_key] = normalized[old_key]
-        normalized.pop(old_key, None)
 
     out: dict[str, object] = {}
     for key in preferred_keys:
         out[key] = normalized.get(key)
     return out
+
+
+def _stable_particle_selection_order(
+    df_particles,
+    *,
+    data_prefix: str,
+    selection_seed: int,
+) -> np.ndarray:
+    """Return a deterministic pseudo-random ordering of particle rows.
+
+    The ordering is derived from stable per-particle metadata rather than process-
+    local RNG state, so every DDP rank sees the same subset for a given STAR file
+    and selection seed.
+    """
+    image_name_values = (
+        df_particles["rlnImageName"].astype(str).tolist()
+        if "rlnImageName" in df_particles
+        else None
+    )
+    micrograph_values = (
+        df_particles["rlnMicrographName"].astype(str).tolist()
+        if "rlnMicrographName" in df_particles
+        else None
+    )
+    optics_values = (
+        df_particles["rlnOpticsGroup"].tolist()
+        if "rlnOpticsGroup" in df_particles
+        else None
+    )
+
+    if image_name_values is None:
+        stack_index, stack_path = parse_stack_entries(df_particles, data_prefix)
+        image_name_values = [
+            f"{int(idx)}@{path}"
+            for idx, path in zip(stack_index.tolist(), stack_path.tolist(), strict=False)
+        ]
+
+    scores = np.empty(len(df_particles), dtype=np.uint64)
+    seed_bytes = int(selection_seed).to_bytes(8, byteorder="little", signed=True)
+
+    for i, image_name in enumerate(image_name_values):
+        hasher = hashlib.blake2b(digest_size=8)
+        hasher.update(seed_bytes)
+        hasher.update(b"\0")
+        hasher.update(image_name.encode("utf-8", errors="surrogatepass"))
+        if micrograph_values is not None:
+            hasher.update(b"\0")
+            hasher.update(str(micrograph_values[i]).encode("utf-8", errors="surrogatepass"))
+        if optics_values is not None:
+            hasher.update(b"\0")
+            hasher.update(str(optics_values[i]).encode("utf-8", errors="surrogatepass"))
+        scores[i] = np.frombuffer(hasher.digest(), dtype=np.uint64)[0]
+
+    return np.argsort(scores, kind="stable")
 
 
 class ParticleDataset(Dataset):
@@ -92,8 +126,10 @@ class ParticleDataset(Dataset):
         data_prefix (str): Prefix prepended to relative MRC/MRCS paths parsed from
             the STAR file.
         num_particles (int | None): Optional cap on the dataset length. If set
-            and smaller than the total number of particles, a random subset is
-            selected.
+            and smaller than the total number of particles, a deterministic
+            pseudo-random subset is selected.
+        selection_seed (int): Seed mixed into the deterministic subset ordering
+            used when ``num_particles`` truncates the dataset.
         image_size (int | None): Target side length in pixels. If smaller than
             the full image size, particles are Fourier-downsampled.
         angpix (float | None): Pixel size override in Angstroms/pixel. If not
@@ -116,6 +152,7 @@ class ParticleDataset(Dataset):
         star_path: str,
         data_prefix: str = "",
         num_particles: int | None = None,
+        selection_seed: int = 0,
         image_size: int | None = None,
         angpix: float | None = None,
         default_optic_params: dict | None = None,
@@ -130,8 +167,12 @@ class ParticleDataset(Dataset):
             if n_req > 0:
                 n_keep = min(n_req, n_total)
                 if n_keep < n_total:
-                    rng = np.random.default_rng()
-                    selected = np.sort(rng.choice(n_total, size=n_keep, replace=False))
+                    selection_order = _stable_particle_selection_order(
+                        self.df_particles,
+                        data_prefix=data_prefix,
+                        selection_seed=int(selection_seed),
+                    )
+                    selected = np.sort(selection_order[:n_keep])
                     self.df_particles = self.df_particles.iloc[selected].reset_index(drop=True)
 
         parsed_angpix, parsed_full_image_size = parse_optics_parameters(self.df_optics)
@@ -199,11 +240,10 @@ class ParticleDataset(Dataset):
 
         self.default_optic_params = _normalize_param_keys(
             default_optic_params,
-            OPTIC_PARAM_KEY_ALIASES,
             [
                 "voltage_kv",
                 "spherical_aberration_mm",
-                "bfactor",
+                "ctf_bfactor",
                 "ctf_scale",
                 "amplitude_contrast",
                 "phase_shift_deg",
@@ -211,7 +251,6 @@ class ParticleDataset(Dataset):
         )
         self.default_particle_params = _normalize_param_keys(
             default_particle_params,
-            PARTICLE_PARAM_KEY_ALIASES,
             [
                 "defocus_u_angstrom",
                 "defocus_v_angstrom",
@@ -222,7 +261,7 @@ class ParticleDataset(Dataset):
         self._optic_fallback_params = {
             "voltage_kv": None,
             "spherical_aberration_mm": None,
-            "bfactor": 0.0,
+            "ctf_bfactor": 0.0,
             "ctf_scale": 1.0,
             "amplitude_contrast": 0.1,
             "phase_shift_deg": 0.0,
@@ -407,13 +446,13 @@ class ParticleDataset(Dataset):
             override_name="default_optic_params['spherical_aberration_mm']",
             cli_arg="--spherical-aberration-mm",
         )
-        self.bfactor = self._get_param(
+        self.ctf_bfactor = self._get_param(
             "rlnCtfBfactor",
             self.df_particles,
-            self.default_optic_params.get("bfactor"),
-            self._optic_fallback_params["bfactor"],
-            override_name="default_optic_params['bfactor']",
-            cli_arg="--bfactor",
+            self.default_optic_params.get("ctf_bfactor"),
+            self._optic_fallback_params["ctf_bfactor"],
+            override_name="default_optic_params['ctf_bfactor']",
+            cli_arg="--ctf-bfactor",
         )
         self.ctf_scale = self._get_param(
             "rlnCtfScalefactor",
@@ -473,13 +512,13 @@ class ParticleDataset(Dataset):
 
         Returns:
             torch.Tensor: A 1D tensor of shape ``(9,)`` with the convention:
-            ``[voltage_kv, spherical_aberration_mm, bfactor, ctf_scale, amplitude_contrast, phase_shift_deg, defocus_u_angstrom, defocus_v_angstrom, defocus_angle_deg]``.
+            ``[voltage_kv, spherical_aberration_mm, ctf_bfactor, ctf_scale, amplitude_contrast, phase_shift_deg, defocus_u_angstrom, defocus_v_angstrom, defocus_angle_deg]``.
         """
         return torch.stack(
             [
                 self.voltage_kv[i],
                 self.spherical_aberration_mm[i],
-                self.bfactor[i],
+                self.ctf_bfactor[i],
                 self.ctf_scale[i],
                 self.amplitude_contrast[i],
                 self.phase_shift_deg[i],
@@ -520,7 +559,7 @@ class ParticleDataset(Dataset):
             "spherical_aberration_mm": self._maybe_constant_scalar(
                 self.spherical_aberration_mm
             ),
-            "bfactor": self._maybe_constant_scalar(self.bfactor),
+            "ctf_bfactor": self._maybe_constant_scalar(self.ctf_bfactor),
             "ctf_scale": self._maybe_constant_scalar(self.ctf_scale),
             "amplitude_contrast": self._maybe_constant_scalar(self.amplitude_contrast),
             "phase_shift_deg": self._maybe_constant_scalar(self.phase_shift_deg),

@@ -88,23 +88,3 @@ def test_triton_project_partial_oob_matches_torch_reference(channel_last: bool):
         edge_value = float(out_torch[0, 0, 0, 0, length - 1].detach().cpu())
 
     assert 0.0 < edge_value < 1.0
-
-
-@pytest.mark.parametrize("channel_last", [True, False])
-@pytest.mark.parametrize("length", [5, 6])
-def test_triton_project_forward_matches_torch_reference_gen_kernel(length: int, channel_last: bool):
-    torch.manual_seed(10)
-    device = torch.device("cuda")
-
-    batch, poses, channels = 1, 3, 3
-    rotation = random_rotation(batch, poses, device=device)
-
-    if channel_last:
-        volume = torch.randn(batch, length, length, length, channels, device=device, dtype=torch.float32)
-    else:
-        volume = torch.randn(batch, channels, length, length, length, device=device, dtype=torch.float32)
-
-    out_triton = project_triton(volume, rotation, channel_last=channel_last)
-    out_torch = project_torch(volume, rotation, channel_last=channel_last)
-
-    torch.testing.assert_close(out_triton, out_torch, rtol=2e-3, atol=2e-3)

@@ -5,6 +5,7 @@ from typing import Any
 
 __all__ = [
     "logging",
+    "particle_mask",
     "reproducibility",
     "torch_utils",
 ]

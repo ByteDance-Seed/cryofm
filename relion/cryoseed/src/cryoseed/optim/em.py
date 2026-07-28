@@ -28,16 +28,24 @@ class EMSolver(Solver):
         self.pose: Pose = pose_searcher.pose
         self.pose_searcher: PoseSearcher = pose_searcher
 
+        if not bool(getattr(self.volume, "requires_accum", False)):
+            raise ValueError(
+                "EMSolver requires volume.requires_accum=True for backprojection/update"
+            )
+        if self.noise is not None and not bool(getattr(self.noise, "requires_accum", False)):
+            raise ValueError(
+                "EMSolver requires noise.requires_accum=True when noise estimation is enabled"
+            )
+
     def refresh(self):
         self.pose_searcher.refresh()
 
     def expectation(self, image, *, particle_index, ctf=None):
-        prob, prob2img_idx, prob2vol_idx, rotmat, trans, sel_radial_residual_power = self.pose_searcher.search(
+        prob, prob2img_idx, prob2vol_idx, rotmat, trans, radial_residual_power = self.pose_searcher.search(
             image,
             particle_index=particle_index,
             ctf=ctf,
         )
-        radial_residual_power = sel_radial_residual_power
         return prob, prob2img_idx, prob2vol_idx, rotmat, trans, radial_residual_power
 
     def maximization(
@@ -52,8 +60,11 @@ class EMSolver(Solver):
         trans,
         radial_residual_power=None,
     ):
+        posterior_search = (
+            self.state.schedule.pose_search_criterion == "posterior"
+        )
         radius = None
-        if not self.state.schedule.full_backprojection:
+        if not posterior_search or not self.state.schedule.full_backprojection:
             radius = int(self.state.schedule.side_length) // 2
         if self.noise is not None:
             noise_spectrum = self.noise.variance_spectrum(ndim=2)
@@ -70,8 +81,8 @@ class EMSolver(Solver):
             noise_spectrum=noise_spectrum,
             radius=radius,
         )
-        if self.noise is not None:
-            if radial_residual_power is not None:
+        if self.noise is not None and posterior_search:
+            if radial_residual_power is not None and not self.state.schedule.full_backprojection:
                 self.noise.accumulate(
                     probability=prob,
                     image_index=prob2img_idx,
@@ -79,6 +90,9 @@ class EMSolver(Solver):
                     num_images=int(image.shape[0]),
                 )
             else:
+                noise_side_length = None
+                if not self.state.schedule.full_backprojection:
+                    noise_side_length = int(self.state.schedule.side_length)
                 self.noise.accumulate(
                     image,
                     ctf,
@@ -88,19 +102,8 @@ class EMSolver(Solver):
                     prob2vol_idx,
                     rotmat,
                     trans,
-                    side_length=int(self.state.schedule.side_length),
+                    side_length=noise_side_length,
                 )
-
-    def accumulate_metrics(self, result: EMInferResult):
-        prob, prob2img_idx = result.prob, result.prob2img_idx
-        _, img_counts = torch.unique_consecutive(
-            prob2img_idx, return_counts=True
-        )
-
-        best_src_idx = torch.cumsum(img_counts, dim=0) - img_counts
-        max_prob_per_img = prob[best_src_idx]
-        self.state.metrics.confidence_sum += max_prob_per_img.sum().item()
-        self.state.metrics.confidence_count += len(img_counts)
 
     def infer(self, batch: DataBatch)-> EMInferResult:
         image = batch.image
@@ -135,7 +138,6 @@ class EMSolver(Solver):
             trans=result.trans,
             radial_residual_power=result.radial_residual_power,
         )
-        self.accumulate_metrics(result)
 
     def update(self):
         if self.prior is not None:
@@ -145,7 +147,10 @@ class EMSolver(Solver):
 
         self.volume.update(prior_precision_spectrum)
 
-        if self.noise is not None:
+        if (
+            self.noise is not None
+            and self.state.schedule.pose_search_criterion == "posterior"
+        ):
             self.noise.update()
 
         self.pose.update()
