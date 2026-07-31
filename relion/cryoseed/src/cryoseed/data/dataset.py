@@ -360,6 +360,28 @@ class ParticleDataset(Dataset):
 
         return self._mrc_handles_by_worker[key]
 
+    def close_cached_mrc_handles(self, *, worker_id: int | None = None) -> None:
+        """Close cached MRC/MRCS mmap handles owned by this dataset instance.
+
+        Args:
+            worker_id: Optional worker id filter. When ``None``, closes all
+                cached handles in the current process. When set, only closes
+                handles whose cache key matches the given worker id.
+        """
+        keys_to_close = [
+            key
+            for key in self._mrc_handles_by_worker
+            if worker_id is None or key[0] == worker_id
+        ]
+        for key in keys_to_close:
+            handle = self._mrc_handles_by_worker.pop(key, None)
+            if handle is None:
+                continue
+            try:
+                handle.close()
+            except Exception:
+                pass
+
     def _get_param(
         self,
         col: str,

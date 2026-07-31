@@ -78,41 +78,48 @@ class HomoRefineScheduler:
         self.image_size = config.data.image_size
         self.angpix = float(config.data.angpix)
         self.particle_diameter = config.data.particle_diameter
-        self.trans_grid_samples = int(config.pose_search.trans_grid_samples)
-        self.particle_mask_enabled = bool(config.data.particle_mask.enabled)
+        self.trans_grid_samples = int(config.modules.search.trans_grid_samples)
+        self.particle_mask_enabled = bool(config.modules.search.particle_mask.enabled)
         self.particle_mask_protection_disable_epochs = int(
-            config.data.particle_mask.protection_disable_epochs
+            config.modules.search.particle_mask.protection_disable_epochs
         )
         self.particle_mask_protection_radius_factor = float(
-            config.data.particle_mask.protection_radius_factor
+            config.modules.search.particle_mask.protection_radius_factor
         )
-        self.confidence_threshold = config.scheduler.confidence_threshold
+        self.confidence_threshold = config.homorefine.scheduler.confidence_threshold
         self.convergence_patience = int(
-            config.scheduler.convergence_patience
+            config.homorefine.scheduler.convergence_patience
         )
         self.fsc_resolution_improvement_threshold = float(
-            config.scheduler.fsc_resolution_improvement_threshold
+            config.homorefine.scheduler.fsc_resolution_improvement_threshold
         )
         self.fsc_resolution_rebound_threshold = float(
-            config.scheduler.fsc_resolution_rebound_threshold
+            config.homorefine.scheduler.fsc_resolution_rebound_threshold
         )
         self.trans_update_rms_threshold = float(
-            config.scheduler.trans_update_rms_threshold
+            config.homorefine.scheduler.trans_update_rms_threshold
         )
-        self.increase_radius_step = config.scheduler.increase_radius_step
-        self.increase_radius_aggressive_factor = config.scheduler.increase_radius_aggressive_factor
+        self.increase_radius_step = config.homorefine.scheduler.increase_radius_step
+        self.increase_radius_aggressive_factor = (
+            config.homorefine.scheduler.increase_radius_aggressive_factor
+        )
         self.increase_radius_aggressive_fsc_threshold = float(
-            config.scheduler.increase_radius_aggressive_fsc_threshold
+            config.homorefine.scheduler.increase_radius_aggressive_fsc_threshold
         )
-        self.base_healpix_order = config.scheduler.base_healpix_order
-        self.auto_local_healpix_order = config.scheduler.auto_local_healpix_order
-        self.use_cache = bool(config.scheduler.use_cache)
-        self.cache_max_healpix_order = config.scheduler.cache_max_healpix_order
-        self.ssd_cache_min_side_length = config.scheduler.ssd_cache_min_side_length
-        self.trans_extent_scale = float(config.scheduler.trans_extent_scale)
-        self.default_full_backprojection = bool(config.reconstruction.full_backprojection)
-        self.num_epochs = int(config.homorefine.num_epochs)
-        self.first_epoch_ncc = bool(config.homorefine.first_epoch_ncc)
+        self.base_healpix_order = config.homorefine.scheduler.base_healpix_order
+        self.auto_local_healpix_order = (
+            config.homorefine.scheduler.auto_local_healpix_order
+        )
+        self.use_cache = bool(config.homorefine.scheduler.use_cache)
+        self.cache_max_healpix_order = config.homorefine.scheduler.cache_max_healpix_order
+        self.ssd_cache_min_side_length = config.homorefine.scheduler.ssd_cache_min_side_length
+        self.trans_extent_scale = float(config.homorefine.scheduler.trans_extent_scale)
+        self.default_full_backprojection = bool(
+            config.modules.volume.full_backprojection
+        )
+        self.num_epochs = int(config.homorefine.engine.num_epochs)
+        self.first_epoch_ncc = bool(config.homorefine.scheduler.first_epoch_ncc)
+        self._apply_execution_flags(epoch=int(self.state.progress.epoch))
         self._update_particle_mask_state(epoch=int(self.state.progress.epoch))
 
         return self
@@ -132,10 +139,11 @@ class HomoRefineScheduler:
     def _apply_execution_flags(self, *, epoch: int) -> None:
         self._resolve_pose_translation_center(auto_value=True)
         self.state.schedule.full_backprojection = (
-            self.default_full_backprojection or bool(self.state.schedule.is_final_epoch)
+            self.default_full_backprojection
+            or bool(self.state.homorefine.engine.is_final_epoch)
         )
-        self.state.schedule.skip_external_reconstruct = bool(
-            self.state.schedule.is_final_epoch
+        self.state.homorefine.engine.skip_external_reconstruct = bool(
+            self.state.homorefine.engine.is_final_epoch
         )
         # The first epoch may use a correlation criterion (implemented via NCC) to
         # stabilize coarse global search before switching to the posterior route.
@@ -146,11 +154,11 @@ class HomoRefineScheduler:
     def _update_particle_mask_state(self, *, epoch: int) -> None:
         if self.particle_mask_protection_disable_epochs < 0:
             raise ValueError(
-                "data.particle_mask.protection_disable_epochs must be >= 0"
+                "modules.search.particle_mask.protection_disable_epochs must be >= 0"
             )
         if self.particle_mask_protection_radius_factor < 0:
             raise ValueError(
-                "data.particle_mask.protection_radius_factor must be >= 0"
+                "modules.search.particle_mask.protection_radius_factor must be >= 0"
             )
         if self.angpix is None or float(self.angpix) <= 0:
             raise ValueError("data.angpix must be set to a positive value")
@@ -166,7 +174,7 @@ class HomoRefineScheduler:
 
         extra_radius_px = (
             self.particle_mask_protection_radius_factor
-            * float(self.state.metrics.trans_update_rms)
+            * float(self.state.homorefine.metrics.trans_update_rms)
         )
         self.state.schedule.particle_mask_extra_diameter_angstrom = max(
             0.0,
@@ -177,7 +185,7 @@ class HomoRefineScheduler:
         self, *, trans_grid_extent: float | None = None
     ) -> int:
         if self.trans_grid_samples <= 0:
-            raise ValueError("pose_search.trans_grid_samples must be > 0")
+            raise ValueError("modules.search.trans_grid_samples must be > 0")
         if self.angpix is None or float(self.angpix) <= 0:
             raise ValueError("data.angpix must be set to a positive value")
         if trans_grid_extent is None:
@@ -185,7 +193,7 @@ class HomoRefineScheduler:
         if trans_grid_extent < 0:
             raise ValueError("trans_grid_extent must be >= 0")
 
-        fsc_resolution = self.state.metrics.fsc_resolution
+        fsc_resolution = self.state.homorefine.metrics.fsc_resolution
         if fsc_resolution is None or float(fsc_resolution) <= 0:
             return int(self.trans_grid_samples)
 
@@ -199,38 +207,43 @@ class HomoRefineScheduler:
 
     def _update_convergence_state(self) -> None:
         if self.convergence_patience < 1:
-            raise ValueError("scheduler.convergence_patience must be >= 1")
+            raise ValueError("homorefine.scheduler.convergence_patience must be >= 1")
         if self.fsc_resolution_improvement_threshold < 0:
             raise ValueError(
-                "scheduler.fsc_resolution_improvement_threshold must be >= 0"
+                "homorefine.scheduler.fsc_resolution_improvement_threshold must be >= 0"
             )
         if self.fsc_resolution_rebound_threshold < 0:
-            raise ValueError("scheduler.fsc_resolution_rebound_threshold must be >= 0")
+            raise ValueError(
+                "homorefine.scheduler.fsc_resolution_rebound_threshold must be >= 0"
+            )
         if self.trans_update_rms_threshold < 0:
-            raise ValueError("scheduler.trans_update_rms_threshold must be >= 0")
+            raise ValueError("homorefine.scheduler.trans_update_rms_threshold must be >= 0")
 
-        resolution_change = self.state.metrics.fsc_resolution_change
+        resolution_change = self.state.homorefine.metrics.fsc_resolution_change
         if resolution_change is None:
-            self.state.progress.num_epochs_without_resolution_gain = 0
+            self.state.homorefine.scheduler.num_epochs_without_resolution_gain = 0
         elif resolution_change < -self.fsc_resolution_improvement_threshold:
-            self.state.progress.num_epochs_without_resolution_gain = 0
+            self.state.homorefine.scheduler.num_epochs_without_resolution_gain = 0
         elif resolution_change > self.fsc_resolution_rebound_threshold:
-            self.state.progress.num_epochs_without_resolution_gain = 0
+            self.state.homorefine.scheduler.num_epochs_without_resolution_gain = 0
         else:
-            self.state.progress.num_epochs_without_resolution_gain += 1
+            self.state.homorefine.scheduler.num_epochs_without_resolution_gain += 1
 
-        if float(self.state.metrics.trans_update_rms) <= self.trans_update_rms_threshold:
-            self.state.progress.num_epochs_with_small_trans_update += 1
+        if (
+            float(self.state.homorefine.metrics.trans_update_rms)
+            <= self.trans_update_rms_threshold
+        ):
+            self.state.homorefine.scheduler.num_epochs_with_small_trans_update += 1
         else:
-            self.state.progress.num_epochs_with_small_trans_update = 0
+            self.state.homorefine.scheduler.num_epochs_with_small_trans_update = 0
 
-        self.state.progress.has_converged = (
-            self.state.progress.num_epochs_without_resolution_gain
+        self.state.homorefine.scheduler.has_converged = (
+            self.state.homorefine.scheduler.num_epochs_without_resolution_gain
             >= self.convergence_patience
-            and self.state.progress.num_epochs_with_small_trans_update
+            and self.state.homorefine.scheduler.num_epochs_with_small_trans_update
             >= self.convergence_patience
         )
-    
+
     def step(self):
         """Frequency marching.
 
@@ -244,7 +257,7 @@ class HomoRefineScheduler:
         if self.particle_diameter is None or float(self.particle_diameter) <= 0:
             raise ValueError("particle_diameter must be set to a positive value (in Angstrom)")
 
-        fsc_resolution = float(self.state.metrics.fsc_resolution)
+        fsc_resolution = float(self.state.homorefine.metrics.fsc_resolution)
 
         angle_res = 360.0 * fsc_resolution / (float(self.particle_diameter) * float(torch.pi))
 
@@ -258,11 +271,11 @@ class HomoRefineScheduler:
             healpix_order_from_res = int(idx[-1].item()) + 1
 
         if int(self.base_healpix_order) < 2:
-            raise ValueError("scheduler.base_healpix_order must be >= 2")
+            raise ValueError("homorefine.scheduler.base_healpix_order must be >= 2")
         if int(self.auto_local_healpix_order) < 2:
-            raise ValueError("scheduler.auto_local_healpix_order must be >= 2")
+            raise ValueError("homorefine.scheduler.auto_local_healpix_order must be >= 2")
         if self.trans_extent_scale < 0:
-            raise ValueError("scheduler.trans_extent_scale must be >= 0")
+            raise ValueError("homorefine.scheduler.trans_extent_scale must be >= 0")
 
         base_healpix_order = min(
             int(self.base_healpix_order),
@@ -335,7 +348,7 @@ class HomoRefineScheduler:
                 )
 
 
-        fsc_scores = self.state.metrics.fsc_scores
+        fsc_scores = self.state.homorefine.metrics.fsc_scores
 
         below = fsc_scores < 0.143
         if bool(torch.any(below)):
@@ -360,7 +373,7 @@ class HomoRefineScheduler:
         )
         fsc_at_side_length_limit = fsc_scores[side_length_limit_index]
         if (
-            self.state.metrics.avg_confidence > self.confidence_threshold
+            self.state.homorefine.metrics.avg_confidence > self.confidence_threshold
             and fsc_at_side_length_limit > self.increase_radius_aggressive_fsc_threshold
         ):
             current_radius += self.increase_radius_aggressive_factor * self.image_size // 2
@@ -380,7 +393,8 @@ class HomoRefineScheduler:
         # Update translation grid extent
         prev_trans_grid_extent = float(self.state.schedule.trans_grid_extent)
         target_trans_grid_extent = (
-            self.trans_extent_scale * float(self.state.metrics.trans_update_rms)
+            self.trans_extent_scale
+            * float(self.state.homorefine.metrics.trans_update_rms)
         )
         # Keep translation-range updates within a fixed multiplicative window based on
         # the previous extent.
@@ -412,20 +426,14 @@ class HomoRefineScheduler:
         self._update_convergence_state()
 
         current_epoch = int(self.state.progress.epoch)
-        current_is_final_epoch = bool(self.state.schedule.is_final_epoch)
+        current_is_final_epoch = bool(self.state.homorefine.engine.is_final_epoch)
         next_epoch = current_epoch + 1
-        self.state.schedule.is_final_epoch = (
+        self.state.homorefine.engine.is_final_epoch = (
             (
-                bool(self.state.progress.has_converged)
+                bool(self.state.homorefine.scheduler.has_converged)
                 and not current_is_final_epoch
             )
             or self._is_last_configured_epoch(next_epoch)
         )
         self._apply_execution_flags(epoch=next_epoch)
         self._update_particle_mask_state(epoch=next_epoch)
-
-        # Reset confidence sum and count for next iteration
-        self.state.metrics.confidence_sum = 0.0
-        self.state.metrics.confidence_count = 0
-        self.state.metrics.volume_class_confidence_sum = 0.0
-        self.state.metrics.volume_class_confidence_count = 0

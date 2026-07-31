@@ -49,12 +49,12 @@ class VoxelGrid(Volume):
     ) -> VoxelGrid:
         return cls(
             grid_size=int(config.data.image_size),
-            num_volumes=int(config.reconstruction.num_volumes),
+            num_volumes=int(config.modules.volume.num_volumes),
             device=device,
             device_mesh=device_mesh,
             requires_accum=requires_accum,
             requires_grad=requires_grad,
-            backproject_chunk=int(config.reconstruction.backproject_chunk),
+            backproject_chunk=int(config.modules.volume.backproject_chunk),
         )
 
     def __init__(

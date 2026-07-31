@@ -45,25 +45,25 @@ class NoiseVariance(nn.Module):
         *,
         requires_accum: bool = True,
     ) -> NoiseVariance | None:
-        if not config.statistics.use_noise:
+        if not config.modules.statistics.noise.enabled:
             return None
         return cls(
             image_size=int(config.data.image_size),
             device=device,
             device_mesh=device_mesh,
             requires_accum=requires_accum,
-            accumulate_chunk=int(config.reconstruction.accumulate_chunk),
-            init_variance=float(config.statistics.init_variance),
-            precision_eps=float(config.statistics.precision_eps),
-            ema_decay=float(config.statistics.noise_ema_decay),
-            prior_weight=float(config.statistics.noise_prior_weight),
-            inflated_weight=float(config.statistics.noise_inflated_weight),
+            accumulate_chunk=int(config.modules.statistics.noise.accumulate_chunk),
+            init_variance=float(config.modules.statistics.noise.init_variance),
+            precision_eps=float(config.modules.statistics.noise.precision_eps),
+            ema_decay=float(config.modules.statistics.noise.ema_decay),
+            prior_weight=float(config.modules.statistics.noise.prior_weight),
+            inflated_weight=float(config.modules.statistics.noise.inflated_weight),
             inflated_decay=(
                 None
-                if config.statistics.noise_inflated_decay is None
-                else float(config.statistics.noise_inflated_decay)
+                if config.modules.statistics.noise.inflated_decay is None
+                else float(config.modules.statistics.noise.inflated_decay)
             ),
-            inflated_scale=float(config.statistics.noise_inflated_scale),
+            inflated_scale=float(config.modules.statistics.noise.inflated_scale),
         )
 
     def __init__(

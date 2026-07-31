@@ -1,8 +1,20 @@
 ## Layout Conventions
 
+See also `docs/dev/config_state_design.md` for the current `config` and `state`
+design rules.
+
 cryoSeed uses a few stable layout orders instead of forcing one global order
 everywhere. The active order should follow the primary semantics of the code
 being written.
+
+### Project Name
+
+Use `cryoSeed` as the default project name spelling.
+
+- Preferred default form: `cryoSeed`
+- Use `CryoSeed` when normal capitalization requires an uppercase initial, such
+  as at the start of a sentence or in a title
+- Do not use `cryoseed`
 
 ### Search-Space Code
 

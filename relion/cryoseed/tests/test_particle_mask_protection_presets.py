@@ -23,7 +23,7 @@ def test_particle_mask_default_matches_0999_preset():
     cfg = MainConfig()
     assert DEFAULT_PARTICLE_MASK_PROTECTION_COVERAGE == "0.999"
     assert math.isclose(
-        cfg.data.particle_mask.protection_radius_factor,
+        cfg.modules.search.particle_mask.protection_radius_factor,
         DEFAULT_PARTICLE_MASK_PROTECTION_RADIUS_FACTOR,
         rel_tol=0.0,
         abs_tol=1e-12,
@@ -42,7 +42,7 @@ def test_cli_particle_mask_protection_coverage_sets_factor():
 
     cfg = MainConfig.from_cli_args(args)
     assert math.isclose(
-        cfg.data.particle_mask.protection_radius_factor,
+        cfg.modules.search.particle_mask.protection_radius_factor,
         PARTICLE_MASK_PROTECTION_COVERAGE_PRESETS["0.99"],
         rel_tol=0.0,
         abs_tol=1e-12,
@@ -62,4 +62,4 @@ def test_cli_particle_mask_protection_factor_overrides_coverage_preset():
     )
 
     cfg = MainConfig.from_cli_args(args)
-    assert cfg.data.particle_mask.protection_radius_factor == 1.75
+    assert cfg.modules.search.particle_mask.protection_radius_factor == 1.75

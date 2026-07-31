@@ -141,7 +141,7 @@ class PoseSearcher(torch.nn.Module):
         seed_index: torch.LongTensor | None = None,
     ):
         if (
-            not self.config.data.particle_mask.enabled
+            not self.config.modules.search.particle_mask.enabled
             or not self.state.schedule.use_particle_mask
         ):
             return image
@@ -154,11 +154,11 @@ class PoseSearcher(torch.nn.Module):
             )
 
         background_noise = None
-        if not self.config.data.particle_mask.zero_mask:
+        if not self.config.modules.search.particle_mask.zero_mask:
             if self.noise is None:
                 raise ValueError(
-                    "statistics.use_noise must be enabled when "
-                    "data.particle_mask.zero_mask is disabled "
+                    "modules.statistics.noise.enabled must be enabled when "
+                    "modules.search.particle_mask.zero_mask is disabled "
                     "(for example, when using `--no-zero-particle-mask`)"
                 )
             particle_seed_index = seed_index
@@ -201,7 +201,9 @@ class PoseSearcher(torch.nn.Module):
             ),
             angpix=float(self.config.data.angpix),
             center=mask_centers,
-            soft_edge_pixels=float(self.config.data.particle_mask.soft_edge_pixels),
+            soft_edge_pixels=float(
+                self.config.modules.search.particle_mask.soft_edge_pixels
+            ),
             device=image_real.device,
             dtype=image_real.real.dtype,
         )
@@ -295,6 +297,7 @@ class PoseSearcher(torch.nn.Module):
         *,
         particle_index: torch.LongTensor | None = None,
         ctf=None,
+        search_grad_mode: str | None = None,
     ):
         """Preprocess images and run the differentiable pose-search route.
 
@@ -303,6 +306,10 @@ class PoseSearcher(torch.nn.Module):
             particle_index: Optional particle indices of shape ``(B,)``. Required when
                 the active pose-search strategy needs pose-bound anchors.
             ctf: Optional per-image CTF tensor passed through to the active searcher.
+            search_grad_mode: Optional differentiable search route override. ``"full"``
+                runs the mathematically faithful full-NLL route, ``"selected"``
+                runs the selected-only reprojection route, and ``None`` uses the
+                current ``state.schedule.search_grad_mode``.
 
         Returns:
             The return value of the strategy-specific ``search_grad()`` implementation.
@@ -323,6 +330,7 @@ class PoseSearcher(torch.nn.Module):
             image,
             particle_index=particle_index,
             ctf=ctf,
+            search_grad_mode=search_grad_mode,
         )
 
     def search(
@@ -332,6 +340,7 @@ class PoseSearcher(torch.nn.Module):
         particle_index: torch.LongTensor | None = None,
         ctf=None,
         mode: str = "auto",
+        search_grad_mode: str | None = None,
     ):
         """Preprocess images and dispatch to the requested pose-search route.
 
@@ -344,6 +353,8 @@ class PoseSearcher(torch.nn.Module):
                 ``"no_grad"`` dispatches to :meth:`search_no_grad`, and ``"auto"``
                 dispatches to :meth:`search_grad` when autograd is enabled and the
                 volume requires gradients.
+            search_grad_mode: Optional differentiable search route override passed
+                through when ``mode`` resolves to ``"grad"``.
 
         Returns:
             The return value of the selected search route.
@@ -353,6 +364,7 @@ class PoseSearcher(torch.nn.Module):
                 image,
                 particle_index=particle_index,
                 ctf=ctf,
+                search_grad_mode=search_grad_mode,
             )
         if mode == "auto":
             if torch.is_grad_enabled() and bool(getattr(self.volume, "requires_grad", False)):
@@ -360,6 +372,7 @@ class PoseSearcher(torch.nn.Module):
                     image,
                     particle_index=particle_index,
                     ctf=ctf,
+                    search_grad_mode=search_grad_mode,
                 )
             return self.search_no_grad(
                 image,

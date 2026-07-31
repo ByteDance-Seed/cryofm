@@ -270,7 +270,6 @@ class SGDSolver(Solver):
             particle_index=particle_index,
             ctf=ctf,
         )
-
         return SGDInferResult(
             image=image,
             ctf=ctf,
@@ -283,8 +282,9 @@ class SGDSolver(Solver):
             radial_residual_power=radial_residual_power,
         )
 
-    def accumulate(self, result: SGDInferResult):
+    def accumulate(self, result: SGDInferResult) -> None:
         result.loss.backward()
+
         if self.noise is not None:
             if result.radial_residual_power is None:
                 raise RuntimeError(
@@ -298,7 +298,6 @@ class SGDSolver(Solver):
                 num_images=int(result.image.shape[0]),
                 side_length=int(self.state.schedule.side_length),
             )
-
             noise_spectrum = self.noise.variance_spectrum(ndim=2)
         else:
             noise_spectrum = None
@@ -318,8 +317,9 @@ class SGDSolver(Solver):
             radius=radius,
         )
 
-    def update(self):
+    def update(self) -> None:
         self.curvature.update()
+
         self.volume.sync_grad_()
         grad = self.volume.volume.grad
         if grad is not None:
@@ -329,11 +329,13 @@ class SGDSolver(Solver):
         self.optimizer.step()
         if (
             self.lr_scheduler is not None
-            and bool(self.state.schedule.activate_learning_rate_decay)
+            and bool(self.state.abinitio.solver.activate_learning_rate_decay)
         ):
             self.lr_scheduler.step()
+
         if self.noise is not None:
             self.noise.update()
+
         self.pose.update()
 
     def zero_accum(self):

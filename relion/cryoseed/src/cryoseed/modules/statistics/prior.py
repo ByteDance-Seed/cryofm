@@ -34,16 +34,16 @@ class PriorVariance(nn.Module):
         config: MainConfig,
         device: torch.device | str | None = None,
     ) -> PriorVariance | None:
-        if not config.statistics.use_prior:
+        if not config.modules.statistics.prior.enabled:
             return None
         return cls(
             image_size=int(config.data.image_size),
             init_volume=None,
-            init_lowpass_cutoff=config.statistics.init_lowpass_cutoff,
+            init_lowpass_cutoff=config.modules.statistics.prior.init_lowpass_cutoff,
             device=device,
-            init_variance=float(config.statistics.init_variance),
-            tail_floor=float(config.statistics.tail_floor),
-            precision_eps=float(config.statistics.precision_eps),
+            init_variance=float(config.modules.statistics.prior.init_variance),
+            tail_floor=float(config.modules.statistics.prior.tail_floor),
+            precision_eps=float(config.modules.statistics.prior.precision_eps),
         )
 
     def __init__(

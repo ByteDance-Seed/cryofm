@@ -1,7 +1,6 @@
-# optim/state.py
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict, is_dataclass, fields
+from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from typing import Any, Dict, Literal, cast
 
 from cryoseed.config import MainConfig
@@ -9,6 +8,9 @@ from cryoseed.config import MainConfig
 
 PoseSearchCriterion = Literal["posterior", "correlation"]
 PoseTranslationCenterMode = Literal["auto", "always", "never"]
+SearchGradMode = Literal["full", "selected"]
+CommandName = Literal["abinitio", "homorefine"]
+_USE_ACTIVE_COMMAND = object()
 
 
 def parse_pose_search_criterion(value: str) -> PoseSearchCriterion:
@@ -25,13 +27,24 @@ def parse_pose_translation_center_mode(value: str) -> PoseTranslationCenterMode:
     return cast(PoseTranslationCenterMode, value)
 
 
-# -------------------------
-# Small utilities
-# -------------------------
+def parse_search_grad_mode(value: str) -> SearchGradMode:
+    """Validate and narrow a differentiable search-route selector."""
+    if value not in ("full", "selected"):
+        raise ValueError(f"Unsupported search_grad_mode: {value!r}")
+    return cast(SearchGradMode, value)
+
+
+def parse_command_name(value: str | None) -> CommandName | None:
+    """Validate and narrow an optional command string."""
+    if value is None:
+        return None
+    if value not in ("abinitio", "homorefine"):
+        raise ValueError(f"Unknown command: {value}")
+    return cast(CommandName, value)
+
+
 def _to_builtin(obj: Any) -> Any:
-    """Convert dataclass / dict / list structures to builtin Python types.
-    Note: tensors/np arrays should be converted by callers (or handled in manager).
-    """
+    """Convert dataclass / dict / list structures to builtin Python types."""
     if is_dataclass(obj):
         return {k: _to_builtin(v) for k, v in asdict(obj).items()}
     if isinstance(obj, dict):
@@ -41,34 +54,23 @@ def _to_builtin(obj: Any) -> Any:
     return obj
 
 
-# -------------------------
-# Namespaces
-# -------------------------
 @dataclass
 class ProgressState:
     """Written by engine only."""
+
     epoch: int = 0
-    half: int | None = None  # current half; None means the current phase has no half concept
-    iter: int = 0  # completed batch count within the current phase/half
-    num_epochs_without_resolution_gain: int = 0
-    num_epochs_with_small_trans_update: int = 0
-    num_checks_with_stable_side_length: int = 0
-    num_checks_with_stable_pose: int = 0
-    num_checks_ready_to_stop: int = 0
-    has_converged: bool = False
+    half: int | None = None
+    iter: int = 0
 
 
 @dataclass
 class ScheduleState:
-    """Written by scheduler only.
+    """Shared execution settings consumed by multiple optim components."""
 
-    ``pose_search_criterion`` currently accepts:
-    - ``"posterior"``: full posterior route with probabilistic weighting
-    - ``"correlation"``: first-epoch correlation route implemented via NCC
-    """
     pose_search_scope: str = "global"
     pose_search_strategy: str = "healpix"
     pose_search_criterion: PoseSearchCriterion = "posterior"
+    search_grad_mode: SearchGradMode = "full"
     healpix_order: int = 2
     oversampling: int = 1
     side_length: int = 32
@@ -79,72 +81,119 @@ class ScheduleState:
     use_particle_mask: bool = False
     particle_mask_extra_diameter_angstrom: float = 0.0
     proj_cache_backend: str = "none"
-    initial_healpix_alignment_done: bool = False
-    healpix_terminal_reached: bool = False
-    is_final_epoch: bool = False
-    activate_learning_rate_decay: bool = False
     full_backprojection: bool = False
-    skip_external_reconstruct: bool = False
 
     def __post_init__(self) -> None:
         self.pose_search_criterion = parse_pose_search_criterion(
             self.pose_search_criterion
         )
+        self.search_grad_mode = parse_search_grad_mode(self.search_grad_mode)
         self.pose_translation_center_mode = parse_pose_translation_center_mode(
             self.pose_translation_center_mode
         )
 
 
 @dataclass
-class MetricsState:
-    """Written by solver/logger; scheduler reads it."""
-    ema_loss: float | None = None
-    ema_loss_change: float | None = None
-
-    confidence_sum: float = 0.0
-    confidence_count: int = 0
-    volume_class_confidence_sum: float = 0.0
-    volume_class_confidence_count: int = 0
+class AbInitioMetricsState:
+    avg_confidence: float = 0.0
+    avg_volume_class_confidence: float = 0.0
     volume_class_change_rate: float = 0.0
     ema_volume_class_change_rate: float | None = None
-
     rot_update_rms: float = 0.0
     trans_update_rms: float = 0.0
     ema_rot_update_rms: float | None = None
     ema_trans_update_rms: float | None = None
-
-    relative_volume_change: float | None = None
-
     side_length_resolution: float | None = None
+
+
+@dataclass
+class AbInitioEngineState:
+    is_final_epoch: bool = False
+    skip_external_reconstruct: bool = False
+
+
+@dataclass
+class AbInitioSolverState:
+    activate_learning_rate_decay: bool = False
+
+
+@dataclass
+class AbInitioSchedulerState:
+    num_checks_with_stable_side_length: int = 0
+    num_checks_with_stable_pose: int = 0
+    num_checks_ready_to_stop: int = 0
+    has_converged: bool = False
+    initial_healpix_alignment_done: bool = False
+    healpix_terminal_reached: bool = False
+
+
+@dataclass
+class AbInitioState:
+    engine: AbInitioEngineState = field(default_factory=AbInitioEngineState)
+    solver: AbInitioSolverState = field(default_factory=AbInitioSolverState)
+    scheduler: AbInitioSchedulerState = field(default_factory=AbInitioSchedulerState)
+    metrics: AbInitioMetricsState = field(default_factory=AbInitioMetricsState)
+
+
+@dataclass
+class HomoRefineEngineState:
+    is_final_epoch: bool = False
+    skip_external_reconstruct: bool = False
+
+
+@dataclass
+class HomoRefineSchedulerState:
+    num_epochs_without_resolution_gain: int = 0
+    num_epochs_with_small_trans_update: int = 0
+    has_converged: bool = False
+
+
+@dataclass
+class HomoRefineMetricsState:
+    avg_confidence: float = 0.0
+    avg_volume_class_confidence: float = 0.0
+    rot_update_rms: float = 0.0
+    trans_update_rms: float = 0.0
     fsc_scores: Any | None = None
     fsc_resolution: float | None = None
     fsc_resolution_change: float | None = None
 
-    @property
-    def avg_confidence(self) -> float:
-        if self.confidence_count == 0:
-            return 0.0
-        return self.confidence_sum / self.confidence_count
 
-    @property
-    def avg_volume_class_confidence(self) -> float:
-        if self.volume_class_confidence_count == 0:
-            return 0.0
-        return self.volume_class_confidence_sum / self.volume_class_confidence_count
+@dataclass
+class HomoRefineState:
+    engine: HomoRefineEngineState = field(default_factory=HomoRefineEngineState)
+    scheduler: HomoRefineSchedulerState = field(default_factory=HomoRefineSchedulerState)
+    metrics: HomoRefineMetricsState = field(default_factory=HomoRefineMetricsState)
 
 
 @dataclass
 class OptimState:
     """Shared state for runner + solvers + scheduler."""
 
-    version: int = 1
-
     progress: ProgressState = field(default_factory=ProgressState)
     schedule: ScheduleState = field(default_factory=ScheduleState)
-    metrics: MetricsState = field(default_factory=MetricsState)
+    abinitio: AbInitioState = field(default_factory=AbInitioState)
+    homorefine: HomoRefineState = field(default_factory=HomoRefineState)
+    _active_command: CommandName | None = field(default=None, repr=False)
 
-    def to_dict(self) -> Dict[str, Any]:
-        return _to_builtin(self)
+    def _to_public_dict(self, command: CommandName | None) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "progress": _to_builtin(self.progress),
+            "schedule": _to_builtin(self.schedule),
+        }
+        if command in (None, "abinitio"):
+            payload["abinitio"] = _to_builtin(self.abinitio)
+        if command in (None, "homorefine"):
+            payload["homorefine"] = _to_builtin(self.homorefine)
+        return payload
+
+    def to_dict(self, *, command: object = _USE_ACTIVE_COMMAND) -> Dict[str, Any]:
+        effective_command = (
+            self._active_command
+            if command is _USE_ACTIVE_COMMAND
+            else parse_command_name(cast(str | None, command))
+        )
+        return self._to_public_dict(effective_command)
 
     @staticmethod
     def _filter_dataclass_kwargs(cls, data: Any) -> Dict[str, Any]:
@@ -162,20 +211,12 @@ class OptimState:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "OptimState":
-        st = cls(version=int(d.get("version", 1)))
+        st = cls()
 
-        progress_kwargs = cls._filter_dataclass_kwargs(ProgressState, d.get("progress", {}))
-        cls._coerce_int_fields(
-            progress_kwargs,
-            "epoch",
-            "half",
-            "iter",
-            "num_epochs_without_resolution_gain",
-            "num_epochs_with_small_trans_update",
-            "num_checks_with_stable_side_length",
-            "num_checks_with_stable_pose",
-            "num_checks_ready_to_stop",
+        progress_kwargs = cls._filter_dataclass_kwargs(
+            ProgressState, d.get("progress", {})
         )
+        cls._coerce_int_fields(progress_kwargs, "epoch", "half", "iter")
         st.progress = ProgressState(**progress_kwargs)
 
         sched_kwargs = cls._filter_dataclass_kwargs(ScheduleState, d.get("schedule", {}))
@@ -188,37 +229,111 @@ class OptimState:
         )
         st.schedule = ScheduleState(**sched_kwargs)
 
-        metrics_kwargs = cls._filter_dataclass_kwargs(MetricsState, d.get("metrics", {}))
-        st.metrics = MetricsState(**metrics_kwargs)
+        abinitio_kwargs = cls._filter_dataclass_kwargs(
+            AbInitioState, d.get("abinitio", {})
+        )
+        if "engine" in abinitio_kwargs:
+            abinitio_kwargs["engine"] = AbInitioEngineState(
+                **cls._filter_dataclass_kwargs(
+                    AbInitioEngineState, abinitio_kwargs["engine"]
+                )
+            )
+        if "solver" in abinitio_kwargs:
+            abinitio_kwargs["solver"] = AbInitioSolverState(
+                **cls._filter_dataclass_kwargs(
+                    AbInitioSolverState, abinitio_kwargs["solver"]
+                )
+            )
+        if "scheduler" in abinitio_kwargs:
+            sched = cls._filter_dataclass_kwargs(
+                AbInitioSchedulerState, abinitio_kwargs["scheduler"]
+            )
+            cls._coerce_int_fields(
+                sched,
+                "num_checks_with_stable_side_length",
+                "num_checks_with_stable_pose",
+                "num_checks_ready_to_stop",
+            )
+            abinitio_kwargs["scheduler"] = AbInitioSchedulerState(**sched)
+        if "metrics" in abinitio_kwargs:
+            abinitio_kwargs["metrics"] = AbInitioMetricsState(
+                **cls._filter_dataclass_kwargs(
+                    AbInitioMetricsState, abinitio_kwargs["metrics"]
+                )
+            )
+        st.abinitio = AbInitioState(**abinitio_kwargs)
+
+        homorefine_kwargs = cls._filter_dataclass_kwargs(
+            HomoRefineState, d.get("homorefine", {})
+        )
+        if "engine" in homorefine_kwargs:
+            homorefine_kwargs["engine"] = HomoRefineEngineState(
+                **cls._filter_dataclass_kwargs(
+                    HomoRefineEngineState, homorefine_kwargs["engine"]
+                )
+            )
+        if "scheduler" in homorefine_kwargs:
+            sched = cls._filter_dataclass_kwargs(
+                HomoRefineSchedulerState, homorefine_kwargs["scheduler"]
+            )
+            cls._coerce_int_fields(
+                sched,
+                "num_epochs_without_resolution_gain",
+                "num_epochs_with_small_trans_update",
+            )
+            homorefine_kwargs["scheduler"] = HomoRefineSchedulerState(**sched)
+        if "metrics" in homorefine_kwargs:
+            homorefine_kwargs["metrics"] = HomoRefineMetricsState(
+                **cls._filter_dataclass_kwargs(
+                    HomoRefineMetricsState, homorefine_kwargs["metrics"]
+                )
+            )
+        st.homorefine = HomoRefineState(**homorefine_kwargs)
+        st._active_command = parse_command_name(d.get("active_command"))
+
         return st
 
     @classmethod
-    def from_config(cls, config: MainConfig) -> "OptimState":
-        st = cls()
-        st.schedule.healpix_order = int(config.pose_search.init_healpix_order)
-        init_trans_grid_extent = config.pose_search.init_trans_grid_extent
+    def from_config(
+        cls, config: MainConfig, *, command: CommandName | None = None
+    ) -> "OptimState":
+        normalized_command = parse_command_name(command)
+        st = cls(_active_command=normalized_command)
+        if normalized_command == "abinitio":
+            scheduler_config = config.abinitio.scheduler
+            use_cache = False
+        elif normalized_command == "homorefine":
+            scheduler_config = config.homorefine.scheduler
+            use_cache = bool(config.homorefine.scheduler.use_cache)
+        else:
+            scheduler_config = None
+            use_cache = False
+
+        st.schedule.healpix_order = int(config.modules.search.init_healpix_order)
+        init_trans_grid_extent = config.modules.search.init_trans_grid_extent
         if init_trans_grid_extent is None:
             if int(config.data.image_size) <= 0:
                 raise ValueError(
-                    "pose_search.init_trans_grid_extent cannot be auto-derived when "
+                    "modules.search.init_trans_grid_extent cannot be auto-derived when "
                     "data.image_size <= 0"
                 )
             init_trans_grid_extent = float(int(config.data.image_size) // 2)
         st.schedule.trans_grid_extent = float(init_trans_grid_extent)
-        st.schedule.trans_grid_samples = int(config.pose_search.trans_grid_samples)
-        st.schedule.pose_translation_center_mode = parse_pose_translation_center_mode(
-            str(config.scheduler.pose_translation_center_mode)
-        )
+        st.schedule.trans_grid_samples = int(config.modules.search.trans_grid_samples)
+        if scheduler_config is not None:
+            st.schedule.pose_translation_center_mode = parse_pose_translation_center_mode(
+                str(scheduler_config.pose_translation_center_mode)
+            )
         st.schedule.use_pose_translation_as_center = True
         st.schedule.use_particle_mask = (
-            bool(config.data.particle_mask.enabled)
-            and int(st.progress.epoch) >= int(config.data.particle_mask.protection_disable_epochs)
+            bool(config.modules.search.particle_mask.enabled)
+            and int(st.progress.epoch)
+            >= int(config.modules.search.particle_mask.protection_disable_epochs)
         )
         st.schedule.particle_mask_extra_diameter_angstrom = 0.0
-        st.schedule.proj_cache_backend = "memory" if bool(config.scheduler.use_cache) else "none"
-        st.schedule.full_backprojection = bool(config.reconstruction.full_backprojection)
-        st.schedule.pose_search_criterion = parse_pose_search_criterion(
-            "posterior"
+        st.schedule.proj_cache_backend = "memory" if use_cache else "none"
+        st.schedule.full_backprojection = bool(
+            config.modules.volume.full_backprojection
         )
-
+        st.schedule.pose_search_criterion = parse_pose_search_criterion("posterior")
         return st

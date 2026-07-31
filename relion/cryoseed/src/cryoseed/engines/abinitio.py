@@ -22,6 +22,7 @@ from cryoseed.data import (
     build_distributed_dataloader,
     data_collate_fn,
     save_mrc,
+    single_thread_worker_init_fn,
 )
 from cryoseed.state import OptimState
 from cryoseed.modules.volume import VoxelGrid
@@ -53,16 +54,11 @@ class ScheduleCheckSnapshot:
     use_pose_translation_as_center: bool
     side_length_resolution: float
     avg_confidence: float
-    confidence_count: int
     avg_volume_class_confidence: float
-    volume_class_confidence_count: int
     volume_class_change_rate: float
     ema_volume_class_change_rate: float | None
-    local_entry_blocked: bool
     ema_rot_update_rms: float | None
     ema_trans_update_rms: float | None
-    relative_volume_change: float | None
-    is_final_epoch: bool
 
 
 @dataclass(frozen=True)
@@ -88,11 +84,9 @@ class AbInitioEngine(torch.nn.Module):
         self.resume_checkpoint_path = resume_checkpoint_path
         self.auto_resume = bool(auto_resume)
         self.runtime = runtime
-        if bool(self.config.scheduler.use_cache):
-            raise ValueError(
-                "abinitio does not support scheduler.use_cache; keep it set to false."
-            )
-        self.init_particles_per_volume = int(self.config.abinitio.init_particles_per_volume)
+        self.init_particles_per_volume = int(
+            self.config.abinitio.engine.init_particles_per_volume
+        )
         if int(self.init_particles_per_volume) <= 0:
             raise ValueError(
                 "init_particles_per_volume must be > 0, got "
@@ -127,6 +121,8 @@ class AbInitioEngine(torch.nn.Module):
                 num_workers=config.data.num_workers,
                 device=device,
                 seed=int(config.reproduce.seed),
+                worker_init_fn=single_thread_worker_init_fn,
+                multiprocessing_context="spawn",
                 device_mesh=device_mesh,
             )
         else:
@@ -136,6 +132,8 @@ class AbInitioEngine(torch.nn.Module):
                 shuffle=True,
                 num_workers=config.data.num_workers,
                 pin_memory=(device.type=="cuda"),
+                worker_init_fn=single_thread_worker_init_fn,
+                multiprocessing_context="spawn",
             )
             sampler = None
 
@@ -150,7 +148,7 @@ class AbInitioEngine(torch.nn.Module):
         self.pose = Pose.from_config(config, device=device, device_mesh=device_mesh)
 
         # optimization
-        self.state = OptimState.from_config(config)
+        self.state = OptimState.from_config(config, command="abinitio")
         self.pose_searcher = PoseSearcher(
             state=self.state,
             volume=self.volume,
@@ -163,9 +161,9 @@ class AbInitioEngine(torch.nn.Module):
         self.solver = SGDSolver(
             state=self.state,
             pose_searcher=self.pose_searcher,
-            learning_rate=float(config.abinitio.learning_rate),
-            learning_rate_decay=float(config.abinitio.learning_rate_decay),
-            momentum=float(config.abinitio.momentum),
+            learning_rate=float(config.abinitio.solver.learning_rate),
+            learning_rate_decay=float(config.abinitio.solver.learning_rate_decay),
+            momentum=float(config.abinitio.solver.momentum),
         )
         self.scheduler = AbInitioScheduler(self.state, device=self.device).from_config(config)
         self.current_loss: float | None = None
@@ -175,6 +173,14 @@ class AbInitioEngine(torch.nn.Module):
         self.probe: _ScheduleProbeBatch | None = None
         self._effective_schedule_check_interval_iters: int | None = None
         self._schedule_check_epoch_total_iters: int | None = None
+        self._confidence_sum = 0.0
+        self._confidence_count = 0
+        self._volume_class_confidence_sum = 0.0
+        self._volume_class_confidence_count = 0
+        self._latest_avg_confidence = 0.0
+        self._latest_avg_volume_class_confidence = 0.0
+        self._ema_loss: float | None = None
+        self._ema_loss_change: float | None = None
 
     def _load_optional_module_state(self, module, state_dict, name: str) -> None:
         if module is None:
@@ -227,16 +233,17 @@ class AbInitioEngine(torch.nn.Module):
 
     def _sync_execution_flags_from_state(self) -> None:
         is_last_configured_epoch = (
-            int(self.state.progress.epoch) >= int(self.config.abinitio.num_epochs) - 1
+            int(self.state.progress.epoch)
+            >= int(self.config.abinitio.engine.num_epochs) - 1
         )
-        self.state.schedule.is_final_epoch = (
-            bool(self.state.schedule.is_final_epoch) or is_last_configured_epoch
+        self.state.abinitio.engine.is_final_epoch = (
+            bool(self.state.abinitio.engine.is_final_epoch) or is_last_configured_epoch
         )
         self.state.schedule.full_backprojection = (
-            bool(self.config.reconstruction.full_backprojection)
+            bool(self.config.modules.volume.full_backprojection)
         )
-        self.state.schedule.skip_external_reconstruct = bool(
-            self.state.schedule.is_final_epoch
+        self.state.abinitio.engine.skip_external_reconstruct = bool(
+            self.state.abinitio.engine.is_final_epoch
         )
 
     def resume_from_checkpoint(self, checkpoint_path: str) -> None:
@@ -269,18 +276,18 @@ class AbInitioEngine(torch.nn.Module):
         self.state.progress.epoch = int(next_epoch)
         self.state.progress.half = None
         self.state.progress.iter = 0
-        self.state.progress.num_epochs_without_resolution_gain = 0
-        self.state.progress.num_epochs_with_small_trans_update = 0
-        self.state.progress.num_checks_with_stable_side_length = int(
+        self.state.abinitio.scheduler.num_checks_with_stable_side_length = int(
             progress.get("num_checks_with_stable_side_length", 0)
         )
-        self.state.progress.num_checks_with_stable_pose = int(
+        self.state.abinitio.scheduler.num_checks_with_stable_pose = int(
             progress.get("num_checks_with_stable_pose", 0)
         )
-        self.state.progress.num_checks_ready_to_stop = int(
+        self.state.abinitio.scheduler.num_checks_ready_to_stop = int(
             progress.get("num_checks_ready_to_stop", 0)
         )
-        self.state.progress.has_converged = bool(progress.get("has_converged", False))
+        self.state.abinitio.scheduler.has_converged = bool(
+            progress.get("has_converged", False)
+        )
 
         required_schedule_keys = (
             "pose_search_scope",
@@ -294,29 +301,38 @@ class AbInitioEngine(torch.nn.Module):
             "use_particle_mask",
             "particle_mask_extra_diameter_angstrom",
             "proj_cache_backend",
-            "initial_healpix_alignment_done",
-            "healpix_terminal_reached",
             "is_final_epoch",
         )
         for key in required_schedule_keys:
             if key not in next_schedule:
                 raise ValueError(f"Checkpoint `next_schedule` is missing `{key}`.")
-            setattr(self.state.schedule, key, next_schedule[key])
+            if key == "is_final_epoch":
+                self.state.abinitio.engine.is_final_epoch = bool(next_schedule[key])
+            else:
+                setattr(self.state.schedule, key, next_schedule[key])
         self.state.schedule.trans_grid_samples = int(
             next_schedule.get(
                 "trans_grid_samples",
                 self.state.schedule.trans_grid_samples,
             )
         )
+        self.state.schedule.search_grad_mode = next_schedule.get(
+            "search_grad_mode", "full"
+        )
+        self.state.abinitio.scheduler.initial_healpix_alignment_done = bool(
+            next_schedule.get("initial_healpix_alignment_done", False)
+        )
+        self.state.abinitio.scheduler.healpix_terminal_reached = bool(
+            next_schedule.get("healpix_terminal_reached", False)
+        )
         self._sync_execution_flags_from_state()
 
-        self.state.metrics.confidence_sum = 0.0
-        self.state.metrics.confidence_count = 0
-        self.state.metrics.volume_class_confidence_sum = 0.0
-        self.state.metrics.volume_class_confidence_count = 0
-        self.state.metrics.volume_class_change_rate = 0.0
-        self.state.metrics.ema_volume_class_change_rate = None
-        self.state.metrics.relative_volume_change = None
+        self._reset_confidence_metrics()
+        self.state.abinitio.solver.activate_learning_rate_decay = False
+        self.state.abinitio.metrics.volume_class_change_rate = 0.0
+        self.state.abinitio.metrics.ema_volume_class_change_rate = None
+        self._ema_loss = None
+        self._ema_loss_change = None
 
         self.current_loss = None
         self.volume_real = None
@@ -328,11 +344,13 @@ class AbInitioEngine(torch.nn.Module):
 
     @torch.no_grad()
     def _resolve_init_lowpass(self) -> dict[str, float | int]:
-        init_lowpass_angstrom = float(self.config.abinitio.init_lowpass_angstrom)
+        init_lowpass_angstrom = float(
+            self.config.abinitio.engine.init_lowpass_angstrom
+        )
         if init_lowpass_angstrom <= 0:
             raise ValueError(
-                "abinitio.init_lowpass_angstrom must be > 0, got "
-                f"{self.config.abinitio.init_lowpass_angstrom}"
+                "abinitio.engine.init_lowpass_angstrom must be > 0, got "
+                f"{self.config.abinitio.engine.init_lowpass_angstrom}"
             )
 
         init_radius = int(
@@ -349,7 +367,7 @@ class AbInitioEngine(torch.nn.Module):
 
     @torch.no_grad()
     def build_solvent_mask(self) -> torch.Tensor | None:
-        selector = str(self.config.abinitio.solvent_mask).strip()
+        selector = str(self.config.abinitio.engine.solvent_mask).strip()
         mode = selector.lower()
 
         if os.path.isfile(selector):
@@ -376,7 +394,7 @@ class AbInitioEngine(torch.nn.Module):
                 int(self.config.data.image_size),
                 radius=float(particle_diameter) / (2.0 * angpix),
                 soft_edge_pixels=float(
-                    self.config.abinitio.solvent_mask_soft_edge_pixels
+                    self.config.abinitio.engine.solvent_mask_soft_edge_pixels
                 ),
                 device=self.device,
             ).to(dtype=torch.float32)
@@ -420,8 +438,12 @@ class AbInitioEngine(torch.nn.Module):
         sample_gen = torch.Generator(device="cpu")
         sample_gen.manual_seed(int(self.config.reproduce.seed))
         sample_index = torch.randperm(num_particles, generator=sample_gen)[:total_init_particles]
-        samples = [self.dataset[int(i)] for i in sample_index.tolist()]
-        init_batch = data_collate_fn(samples).to(self.device, non_blocking=True)
+        try:
+            samples = [self.dataset[int(i)] for i in sample_index.tolist()]
+            init_batch = data_collate_fn(samples).to(self.device, non_blocking=True)
+        finally:
+            # Avoid carrying parent-process mmap state into the first worker startup.
+            self.dataset.close_cached_mrc_handles(worker_id=-1)
         if init_batch.ctf is None:
             raise ValueError("ab initio initialization requires per-image CTF")
 
@@ -475,7 +497,31 @@ class AbInitioEngine(torch.nn.Module):
         self.volume.requires_accum = False
 
         if self.noise is not None:
-            self.noise.from_data([self.dataloader])
+            if self.runtime.is_distributed:
+                noise_dataloader, _ = build_distributed_dataloader(
+                    self.dataset,
+                    batch_size=self.config.data.batch_size,
+                    shuffle=False,
+                    num_workers=self.config.data.num_workers,
+                    device=self.device,
+                    seed=int(self.config.reproduce.seed),
+                    drop_last=True,
+                    worker_init_fn=single_thread_worker_init_fn,
+                    multiprocessing_context="spawn",
+                    device_mesh=self.device_mesh,
+                )
+            else:
+                noise_dataloader = build_dataloader(
+                    self.dataset,
+                    batch_size=self.config.data.batch_size,
+                    shuffle=False,
+                    num_workers=self.config.data.num_workers,
+                    pin_memory=(self.device.type == "cuda"),
+                    drop_last=True,
+                    worker_init_fn=single_thread_worker_init_fn,
+                    multiprocessing_context="spawn",
+                )
+            self.noise.from_data([noise_dataloader])
 
 
     def preprocess(self, _batch: DataBatch):
@@ -485,15 +531,45 @@ class AbInitioEngine(torch.nn.Module):
 
     def _reset_schedule_check_state(self) -> None:
         self._last_schedule_check_volume = None
-        self.state.metrics.relative_volume_change = None
+
+    def _reset_confidence_metrics(self) -> None:
+        self._confidence_sum = 0.0
+        self._confidence_count = 0
+        self._volume_class_confidence_sum = 0.0
+        self._volume_class_confidence_count = 0
+        self.state.abinitio.metrics.avg_confidence = 0.0
+        self.state.abinitio.metrics.avg_volume_class_confidence = 0.0
+
+    def _update_confidence_metric_means(self) -> None:
+        if self._confidence_count <= 0:
+            self.state.abinitio.metrics.avg_confidence = 0.0
+        else:
+            self.state.abinitio.metrics.avg_confidence = (
+                self._confidence_sum / float(self._confidence_count)
+            )
+        if self._volume_class_confidence_count <= 0:
+            self.state.abinitio.metrics.avg_volume_class_confidence = 0.0
+        else:
+            self.state.abinitio.metrics.avg_volume_class_confidence = (
+                self._volume_class_confidence_sum
+                / float(self._volume_class_confidence_count)
+            )
+
+    def _update_latest_confidence_metrics(self) -> None:
+        self._latest_avg_confidence = float(
+            self.state.abinitio.metrics.avg_confidence
+        )
+        self._latest_avg_volume_class_confidence = float(
+            self.state.abinitio.metrics.avg_volume_class_confidence
+        )
 
     def _configured_schedule_check_interval_iters(self) -> int:
         schedule_check_interval_iters = int(
-            self.config.scheduler.schedule_check_interval_iters
+            self.config.abinitio.scheduler.schedule_check_interval_iters
         )
         if schedule_check_interval_iters <= 0:
             raise ValueError(
-                "scheduler.schedule_check_interval_iters must be > 0"
+                "abinitio.scheduler.schedule_check_interval_iters must be > 0"
             )
         return schedule_check_interval_iters
 
@@ -631,23 +707,6 @@ class AbInitioEngine(torch.nn.Module):
     @torch.no_grad()
     def _update_schedule_check_metrics(self) -> None:
         current_volume = self._current_schedule_check_volume()
-
-        if (
-            self._last_schedule_check_volume is None
-            or tuple(self._last_schedule_check_volume.shape) != tuple(current_volume.shape)
-        ):
-            self.state.metrics.relative_volume_change = None
-        else:
-            delta_norm = torch.linalg.vector_norm(
-                (current_volume - self._last_schedule_check_volume).reshape(-1)
-            )
-            base_norm = torch.linalg.vector_norm(
-                self._last_schedule_check_volume.reshape(-1)
-            ).clamp_min(1e-12)
-            self.state.metrics.relative_volume_change = float(
-                (delta_norm / base_norm).item()
-            )
-
         self._last_schedule_check_volume = current_volume
 
     @torch.no_grad()
@@ -723,6 +782,19 @@ class AbInitioEngine(torch.nn.Module):
             parts.append(f"class{volume_idx:03d}={count} ({frac:.1f}%)")
         return " | ".join(parts)
 
+    def _build_completion_log_lines(self, status: str) -> list[str]:
+        lines = [
+            status,
+            (
+                f"Resolution     : "
+                f"{float(self.scheduler._side_length_to_resolution(int(self.state.schedule.side_length))):.2f} Angstrom"
+            ),
+        ]
+        volume_occupancy = self._format_volume_occupancy()
+        if volume_occupancy is not None:
+            lines.append(f"Occupancy      : {volume_occupancy}")
+        return lines
+
     def save_volume_snapshot(self) -> list[str] | None:
         epoch = int(self.state.progress.epoch)
         iteration = int(self.state.progress.iter)
@@ -753,6 +825,8 @@ class AbInitioEngine(torch.nn.Module):
         epoch: int,
         before: ScheduleCheckSnapshot,
         after: ScheduleCheckSnapshot,
+        before_is_final_epoch: bool,
+        after_is_final_epoch: bool,
     ) -> None:
         if not is_rank0():
             return
@@ -801,16 +875,13 @@ class AbInitioEngine(torch.nn.Module):
             f"Pose Search : L={before.side_length}, healpix={before.healpix_order}, trans_extent={before.trans_grid_extent:.2f}, trans_samples={before.trans_grid_samples}, trans_center={'pose' if before.use_pose_translation_as_center else 'zero'}",
             f"Stable      : side={side_length_stable}, side_rot={side_length_rotation_stable}, healpix_rot={healpix_rotation_stable}, trans={translation_stable}, pose={pose_stable}",
             f"Resolution  : {float(before_resolution):.2f} Angstrom",
-            f"Confidence  : {100.0 * float(before.avg_confidence):.2f}% (count={int(before.confidence_count)})",
-            f"Class Confidence : {100.0 * float(before.avg_volume_class_confidence):.2f}% (count={int(before.volume_class_confidence_count)})",
+            f"Confidence  : {100.0 * float(before.avg_confidence):.2f}%",
+            f"Class Confidence : {100.0 * float(before.avg_volume_class_confidence):.2f}%",
             f"Class Change : {100.0 * float(before.ema_volume_class_change_rate if before.ema_volume_class_change_rate is not None else before.volume_class_change_rate):.2f}%",
             f"Pose RMS    : rot_side={'n/a' if ema_rot_update_rms_deg is None else f'{ema_rot_update_rms_deg:.2f}/{side_length_rotation_threshold_deg:.2f} deg'} | rot_healpix={'n/a' if ema_rot_update_rms_deg is None else f'{ema_rot_update_rms_deg:.2f}/{rotation_threshold_deg:.2f} deg'} | trans={'n/a' if before.ema_trans_update_rms is None else f'{float(before.ema_trans_update_rms):.2f}/{translation_threshold:.2f} px'}",
         ]
         if volume_occupancy is not None:
             summary_lines.append(f"Occupancy   : {volume_occupancy}")
-        summary_lines.append(
-            f"Volume Rel  : {'n/a' if before.relative_volume_change is None else f'{float(before.relative_volume_change):.3e}'}"
-        )
         log_block(
             logger,
             title=f"Schedule Check Summary (Epoch {epoch} Iter {self.state.progress.iter})",
@@ -820,12 +891,19 @@ class AbInitioEngine(torch.nn.Module):
         next_lines = [
             f"Pose Search : L={after.side_length}, healpix={after.healpix_order}, trans_extent={after.trans_grid_extent:.2f}, trans_samples={after.trans_grid_samples}, trans_center={'pose' if after.use_pose_translation_as_center else 'zero'}",
         ]
-        next_lines.extend(self._schedule_action_lines(before, after))
-        if after.local_entry_blocked:
+        next_lines.extend(
+            self._schedule_action_lines(
+                before,
+                after,
+                before_is_final_epoch=before_is_final_epoch,
+                after_is_final_epoch=after_is_final_epoch,
+            )
+        )
+        if self.scheduler.local_entry_blocked():
             next_lines.append(
                 "Action      : local entry blocked by class change"
             )
-        next_lines.append(f"Final Epoch : {after.is_final_epoch}")
+        next_lines.append(f"Final Epoch : {after_is_final_epoch}")
         log_block(
             logger,
             title=f"Next Schedule Configuration (Epoch {epoch} Iter {self.state.progress.iter})",
@@ -846,37 +924,33 @@ class AbInitioEngine(torch.nn.Module):
             side_length_resolution=float(
                 self.scheduler._side_length_to_resolution(int(self.state.schedule.side_length))
             ),
-            avg_confidence=float(self.state.metrics.avg_confidence),
-            confidence_count=int(self.state.metrics.confidence_count),
-            avg_volume_class_confidence=float(self.state.metrics.avg_volume_class_confidence),
-            volume_class_confidence_count=int(self.state.metrics.volume_class_confidence_count),
-            volume_class_change_rate=float(self.state.metrics.volume_class_change_rate),
+            avg_confidence=float(self.state.abinitio.metrics.avg_confidence),
+            avg_volume_class_confidence=float(self.state.abinitio.metrics.avg_volume_class_confidence),
+            volume_class_change_rate=float(self.state.abinitio.metrics.volume_class_change_rate),
             ema_volume_class_change_rate=(
                 None
-                if self.state.metrics.ema_volume_class_change_rate is None
-                else float(self.state.metrics.ema_volume_class_change_rate)
+                if self.state.abinitio.metrics.ema_volume_class_change_rate is None
+                else float(self.state.abinitio.metrics.ema_volume_class_change_rate)
             ),
-            local_entry_blocked=bool(self.scheduler.local_entry_blocked()),
             ema_rot_update_rms=(
                 None
-                if self.state.metrics.ema_rot_update_rms is None
-                else float(self.state.metrics.ema_rot_update_rms)
+                if self.state.abinitio.metrics.ema_rot_update_rms is None
+                else float(self.state.abinitio.metrics.ema_rot_update_rms)
             ),
             ema_trans_update_rms=(
                 None
-                if self.state.metrics.ema_trans_update_rms is None
-                else float(self.state.metrics.ema_trans_update_rms)
+                if self.state.abinitio.metrics.ema_trans_update_rms is None
+                else float(self.state.abinitio.metrics.ema_trans_update_rms)
             ),
-            relative_volume_change=(
-                None
-                if self.state.metrics.relative_volume_change is None
-                else float(self.state.metrics.relative_volume_change)
-            ),
-            is_final_epoch=bool(self.state.schedule.is_final_epoch),
         )
 
     def _schedule_changed(
-        self, before: ScheduleCheckSnapshot, after: ScheduleCheckSnapshot
+        self,
+        before: ScheduleCheckSnapshot,
+        after: ScheduleCheckSnapshot,
+        *,
+        before_is_final_epoch: bool,
+        after_is_final_epoch: bool,
     ) -> bool:
         return (
             before.pose_search_scope != after.pose_search_scope
@@ -889,11 +963,16 @@ class AbInitioEngine(torch.nn.Module):
                 before.use_pose_translation_as_center
                 != after.use_pose_translation_as_center
             )
-            or before.is_final_epoch != after.is_final_epoch
+            or before_is_final_epoch != after_is_final_epoch
         )
 
     def _should_refresh_solver_for_schedule_change(
-        self, before: ScheduleCheckSnapshot, after: ScheduleCheckSnapshot
+        self,
+        before: ScheduleCheckSnapshot,
+        after: ScheduleCheckSnapshot,
+        *,
+        before_is_final_epoch: bool,
+        after_is_final_epoch: bool,
     ) -> bool:
         return (
             before.pose_search_scope != after.pose_search_scope
@@ -906,23 +985,43 @@ class AbInitioEngine(torch.nn.Module):
                 before.use_pose_translation_as_center
                 != after.use_pose_translation_as_center
             )
-            or (not before.is_final_epoch and after.is_final_epoch)
+            or (not before_is_final_epoch and after_is_final_epoch)
         )
 
     def _should_save_volume_snapshot_for_schedule_change(
-        self, before: ScheduleCheckSnapshot, after: ScheduleCheckSnapshot
+        self,
+        before: ScheduleCheckSnapshot,
+        after: ScheduleCheckSnapshot,
+        *,
+        before_is_final_epoch: bool,
+        after_is_final_epoch: bool,
     ) -> bool:
-        return len(self._schedule_action_lines(before, after)) > 0
+        return (
+            len(
+                self._schedule_action_lines(
+                    before,
+                    after,
+                    before_is_final_epoch=before_is_final_epoch,
+                    after_is_final_epoch=after_is_final_epoch,
+                )
+            )
+            > 0
+        )
 
     def _schedule_action_lines(
-        self, before: ScheduleCheckSnapshot, after: ScheduleCheckSnapshot
+        self,
+        before: ScheduleCheckSnapshot,
+        after: ScheduleCheckSnapshot,
+        *,
+        before_is_final_epoch: bool,
+        after_is_final_epoch: bool,
     ) -> list[str]:
         actions: list[str] = []
         if before.side_length != after.side_length:
             actions.append("Action      : increased side_length")
         if before.healpix_order != after.healpix_order:
             actions.append("Action      : increased healpix_order")
-        if not before.is_final_epoch and after.is_final_epoch:
+        if not before_is_final_epoch and after_is_final_epoch:
             actions.append("Action      : marked current epoch as final")
         return actions
 
@@ -933,14 +1032,13 @@ class AbInitioEngine(torch.nn.Module):
         valid_count = int(self.pose.valid_count.sum().item())
         if valid_count <= 0:
             return
-        self.state.metrics.confidence_sum += (
-            float(self.pose.avg_confidence.item()) * valid_count
-        )
-        self.state.metrics.confidence_count += valid_count
-        self.state.metrics.volume_class_confidence_sum += (
+        self._confidence_sum += float(self.pose.avg_confidence.item()) * valid_count
+        self._confidence_count += valid_count
+        self._volume_class_confidence_sum += (
             float(self.pose.avg_volume_class_confidence.item()) * valid_count
         )
-        self.state.metrics.volume_class_confidence_count += valid_count
+        self._volume_class_confidence_count += valid_count
+        self._update_confidence_metric_means()
 
     @torch.no_grad()
     def _evaluate_batch_metrics(self) -> None:
@@ -948,17 +1046,18 @@ class AbInitioEngine(torch.nn.Module):
         if self.current_loss is None:
             raise RuntimeError("current_loss is unavailable for evaluation")
         self._accumulate_confidence_metrics_from_pose()
-        self.state.metrics.side_length_resolution = self.scheduler._side_length_to_resolution(
+        self._update_latest_confidence_metrics()
+        self.state.abinitio.metrics.side_length_resolution = self.scheduler._side_length_to_resolution(
             int(self.state.schedule.side_length)
         )
         batch_loss = float(self.current_loss)
-        loss_ema_decay = float(self.config.abinitio.loss_ema_decay)
+        loss_ema_decay = float(self.config.abinitio.engine.loss_ema_decay)
         if not (0.0 <= loss_ema_decay < 1.0):
             raise ValueError(
-                "abinitio.loss_ema_decay must be in [0, 1), got "
-                f"{self.config.abinitio.loss_ema_decay}"
+                "abinitio.engine.loss_ema_decay must be in [0, 1), got "
+                f"{self.config.abinitio.engine.loss_ema_decay}"
             )
-        prev_ema_loss = self.state.metrics.ema_loss
+        prev_ema_loss = self._ema_loss
         if prev_ema_loss is None:
             ema_loss = float(batch_loss)
         else:
@@ -966,25 +1065,25 @@ class AbInitioEngine(torch.nn.Module):
                 loss_ema_decay * float(prev_ema_loss)
                 + (1.0 - loss_ema_decay) * float(batch_loss)
             )
-        self.state.metrics.ema_loss = float(ema_loss)
-        self.state.metrics.ema_loss_change = (
+        self._ema_loss = float(ema_loss)
+        self._ema_loss_change = (
             None
             if prev_ema_loss is None
             else float(ema_loss) - float(prev_ema_loss)
         )
         volume_class_change_rate = float(self.pose.volume_class_change_rate.item())
-        self.state.metrics.volume_class_change_rate = volume_class_change_rate
-        prev_ema_volume_class_change_rate = self.state.metrics.ema_volume_class_change_rate
-        pose_rms_ema_decay = float(self.config.abinitio.pose_rms_ema_decay)
+        self.state.abinitio.metrics.volume_class_change_rate = volume_class_change_rate
+        prev_ema_volume_class_change_rate = self.state.abinitio.metrics.ema_volume_class_change_rate
+        pose_rms_ema_decay = float(self.config.abinitio.engine.pose_rms_ema_decay)
         if not (0.0 <= pose_rms_ema_decay < 1.0):
             raise ValueError(
-                "abinitio.pose_rms_ema_decay must be in [0, 1), got "
-                f"{self.config.abinitio.pose_rms_ema_decay}"
+                "abinitio.engine.pose_rms_ema_decay must be in [0, 1), got "
+                f"{self.config.abinitio.engine.pose_rms_ema_decay}"
             )
         if prev_ema_volume_class_change_rate is None:
-            self.state.metrics.ema_volume_class_change_rate = volume_class_change_rate
+            self.state.abinitio.metrics.ema_volume_class_change_rate = volume_class_change_rate
         else:
-            self.state.metrics.ema_volume_class_change_rate = (
+            self.state.abinitio.metrics.ema_volume_class_change_rate = (
                 pose_rms_ema_decay * float(prev_ema_volume_class_change_rate)
                 + (1.0 - pose_rms_ema_decay) * volume_class_change_rate
             )
@@ -995,25 +1094,25 @@ class AbInitioEngine(torch.nn.Module):
         rot_update_rms: float,
         trans_update_rms: float,
     ) -> None:
-        pose_rms_ema_decay = float(self.config.abinitio.pose_rms_ema_decay)
+        pose_rms_ema_decay = float(self.config.abinitio.engine.pose_rms_ema_decay)
         if not (0.0 <= pose_rms_ema_decay < 1.0):
             raise ValueError(
-                "abinitio.pose_rms_ema_decay must be in [0, 1), got "
-                f"{self.config.abinitio.pose_rms_ema_decay}"
+                "abinitio.engine.pose_rms_ema_decay must be in [0, 1), got "
+                f"{self.config.abinitio.engine.pose_rms_ema_decay}"
             )
-        prev_ema_rot_update_rms = self.state.metrics.ema_rot_update_rms
-        prev_ema_trans_update_rms = self.state.metrics.ema_trans_update_rms
+        prev_ema_rot_update_rms = self.state.abinitio.metrics.ema_rot_update_rms
+        prev_ema_trans_update_rms = self.state.abinitio.metrics.ema_trans_update_rms
         if prev_ema_rot_update_rms is None:
-            self.state.metrics.ema_rot_update_rms = float(rot_update_rms)
+            self.state.abinitio.metrics.ema_rot_update_rms = float(rot_update_rms)
         else:
-            self.state.metrics.ema_rot_update_rms = (
+            self.state.abinitio.metrics.ema_rot_update_rms = (
                 pose_rms_ema_decay * float(prev_ema_rot_update_rms)
                 + (1.0 - pose_rms_ema_decay) * float(rot_update_rms)
             )
         if prev_ema_trans_update_rms is None:
-            self.state.metrics.ema_trans_update_rms = float(trans_update_rms)
+            self.state.abinitio.metrics.ema_trans_update_rms = float(trans_update_rms)
         else:
-            self.state.metrics.ema_trans_update_rms = (
+            self.state.abinitio.metrics.ema_trans_update_rms = (
                 pose_rms_ema_decay * float(prev_ema_trans_update_rms)
                 + (1.0 - pose_rms_ema_decay) * float(trans_update_rms)
             )
@@ -1023,8 +1122,8 @@ class AbInitioEngine(torch.nn.Module):
         probe_pose_rms = self._compute_probe_pose_rms()
         if probe_pose_rms is not None:
             rot_update_rms, trans_update_rms = probe_pose_rms
-            self.state.metrics.rot_update_rms = float(rot_update_rms)
-            self.state.metrics.trans_update_rms = float(trans_update_rms)
+            self.state.abinitio.metrics.rot_update_rms = float(rot_update_rms)
+            self.state.abinitio.metrics.trans_update_rms = float(trans_update_rms)
             self._update_pose_rms_ema(rot_update_rms, trans_update_rms)
         self._update_schedule_check_metrics()
 
@@ -1050,10 +1149,10 @@ class AbInitioEngine(torch.nn.Module):
                 "noise": self.noise.state_dict() if self.noise else None,
             },
             "progress": {
-                "num_checks_with_stable_side_length": self.state.progress.num_checks_with_stable_side_length,
-                "num_checks_with_stable_pose": self.state.progress.num_checks_with_stable_pose,
-                "num_checks_ready_to_stop": self.state.progress.num_checks_ready_to_stop,
-                "has_converged": self.state.progress.has_converged,
+                "num_checks_with_stable_side_length": self.state.abinitio.scheduler.num_checks_with_stable_side_length,
+                "num_checks_with_stable_pose": self.state.abinitio.scheduler.num_checks_with_stable_pose,
+                "num_checks_ready_to_stop": self.state.abinitio.scheduler.num_checks_ready_to_stop,
+                "has_converged": self.state.abinitio.scheduler.has_converged,
             },
 
             "next_epoch": epoch + 1,
@@ -1065,14 +1164,15 @@ class AbInitioEngine(torch.nn.Module):
                 "side_length": self.state.schedule.side_length,
                 "trans_grid_extent": self.state.schedule.trans_grid_extent,
                 "trans_grid_samples": self.state.schedule.trans_grid_samples,
+                "search_grad_mode": self.state.schedule.search_grad_mode,
                 "pose_translation_center_mode": self.state.schedule.pose_translation_center_mode,
                 "use_pose_translation_as_center": self.state.schedule.use_pose_translation_as_center,
                 "use_particle_mask": self.state.schedule.use_particle_mask,
                 "particle_mask_extra_diameter_angstrom": self.state.schedule.particle_mask_extra_diameter_angstrom,
                 "proj_cache_backend": self.state.schedule.proj_cache_backend,
-                "initial_healpix_alignment_done": self.state.schedule.initial_healpix_alignment_done,
-                "healpix_terminal_reached": self.state.schedule.healpix_terminal_reached,
-                "is_final_epoch": self.state.schedule.is_final_epoch,
+                "initial_healpix_alignment_done": self.state.abinitio.scheduler.initial_healpix_alignment_done,
+                "healpix_terminal_reached": self.state.abinitio.scheduler.healpix_terminal_reached,
+                "is_final_epoch": self.state.abinitio.engine.is_final_epoch,
             }
         }
 
@@ -1152,7 +1252,7 @@ class AbInitioEngine(torch.nn.Module):
                         ],
                     )
 
-            if should_resume and bool(self.state.progress.has_converged):
+            if should_resume and bool(self.state.abinitio.scheduler.has_converged):
                 logger.info(
                     "Resume checkpoint already represents a completed ab initio run | next_epoch=%d",
                     start_epoch,
@@ -1162,9 +1262,9 @@ class AbInitioEngine(torch.nn.Module):
                     log_block(
                         logger,
                         title="Ab Initio Reconstruction Completed",
-                        lines=[
-                            "Checkpoint already captured the final completed epoch",
-                        ],
+                        lines=self._build_completion_log_lines(
+                            "Checkpoint already captured the final completed epoch"
+                        ),
                     )
                 final_map_paths = self.save_final_volume()
                 final_map_path = self._format_saved_map_paths(final_map_paths)
@@ -1172,11 +1272,11 @@ class AbInitioEngine(torch.nn.Module):
                     logger.info("Final volume saved | path=%s", final_map_path)
                 return
 
-            if start_epoch >= int(self.config.abinitio.num_epochs):
+            if start_epoch >= int(self.config.abinitio.engine.num_epochs):
                 logger.warning(
                     "No epochs to run after resume: start_epoch=%d, num_epochs=%d",
                     start_epoch,
-                    int(self.config.abinitio.num_epochs),
+                    int(self.config.abinitio.engine.num_epochs),
                 )
                 return
 
@@ -1185,10 +1285,11 @@ class AbInitioEngine(torch.nn.Module):
             completed_via_convergence_final_epoch = False
             self.solver.refresh()
             # loop
-            for epoch in range(start_epoch, self.config.abinitio.num_epochs):
+            for epoch in range(start_epoch, self.config.abinitio.engine.num_epochs):
                 self.state.progress.epoch = epoch
                 self._sync_execution_flags_from_state()
                 self._set_effective_schedule_check_interval_for_epoch()
+                self._reset_confidence_metrics()
 
                 if self.device.type == "cuda":
                     torch.cuda.synchronize(self.device)
@@ -1219,7 +1320,12 @@ class AbInitioEngine(torch.nn.Module):
                         configured_interval,
                     )
 
-                log_state(logger, self.state, title=f"Epoch {epoch} State")
+                log_state(
+                    logger,
+                    self.state,
+                    title=f"Epoch {epoch} State",
+                    command="abinitio",
+                )
 
                 dl = self.dataloader
                 if is_rank0() and tqdm is not None:
@@ -1251,22 +1357,38 @@ class AbInitioEngine(torch.nn.Module):
                     self.evaluate()
                     is_schedule_check_iter = self._is_schedule_check_iter()
                     if (
-                        not bool(self.state.schedule.is_final_epoch)
+                        not bool(self.state.abinitio.engine.is_final_epoch)
                         and is_schedule_check_iter
                     ):
+                        before_is_final_epoch = bool(
+                            self.state.abinitio.engine.is_final_epoch
+                        )
                         snapshot_before_step = self._capture_schedule_check_snapshot()
                         self.scheduler.step()
+                        after_is_final_epoch = bool(
+                            self.state.abinitio.engine.is_final_epoch
+                        )
                         snapshot_after_step = self._capture_schedule_check_snapshot()
+                        self._reset_confidence_metrics()
                         schedule_changed = self._schedule_changed(
-                            snapshot_before_step, snapshot_after_step
+                            snapshot_before_step,
+                            snapshot_after_step,
+                            before_is_final_epoch=before_is_final_epoch,
+                            after_is_final_epoch=after_is_final_epoch,
                         )
                         if self._should_refresh_solver_for_schedule_change(
-                            snapshot_before_step, snapshot_after_step
+                            snapshot_before_step,
+                            snapshot_after_step,
+                            before_is_final_epoch=before_is_final_epoch,
+                            after_is_final_epoch=after_is_final_epoch,
                         ):
                             self.solver.refresh()
                         if schedule_changed:
                             if self._should_save_volume_snapshot_for_schedule_change(
-                                snapshot_before_step, snapshot_after_step
+                                snapshot_before_step,
+                                snapshot_after_step,
+                                before_is_final_epoch=before_is_final_epoch,
+                                after_is_final_epoch=after_is_final_epoch,
                             ):
                                 snapshot_paths = self.save_volume_snapshot()
                                 snapshot_path = self._format_saved_map_paths(
@@ -1284,43 +1406,55 @@ class AbInitioEngine(torch.nn.Module):
                                 epoch=epoch,
                                 before=snapshot_before_step,
                                 after=snapshot_after_step,
+                                before_is_final_epoch=before_is_final_epoch,
+                                after_is_final_epoch=after_is_final_epoch,
                             )
-                        elif snapshot_after_step.local_entry_blocked:
+                        elif self.scheduler.local_entry_blocked():
                             self._log_scheduler_event(
                                 logger,
                                 epoch=epoch,
                                 before=snapshot_before_step,
                                 after=snapshot_after_step,
+                                before_is_final_epoch=before_is_final_epoch,
+                                after_is_final_epoch=after_is_final_epoch,
                             )
                         self._snapshot_schedule_check_state()
-                        if bool(self.state.progress.has_converged):
-                            stopped_mid_epoch_on_convergence = True
-                            logger.info(
-                                "Ab initio converged at epoch=%d | iter=%d | stopping immediately",
-                                epoch,
-                                int(self.state.progress.iter),
-                            )
-                            break
+                        if bool(self.state.abinitio.scheduler.has_converged):
+                            if epoch == 0:
+                                logger.info(
+                                    "Ab initio converged at epoch=0 | iter=%d | "
+                                    "finishing the first epoch before stopping",
+                                    int(self.state.progress.iter),
+                                )
+                            else:
+                                stopped_mid_epoch_on_convergence = True
+                                logger.info(
+                                    "Ab initio converged at epoch=%d | iter=%d | "
+                                    "stopping immediately",
+                                    epoch,
+                                    int(self.state.progress.iter),
+                                )
+                                break
                     if is_schedule_check_iter:
                         self._stash_schedule_probe(batch)
                     if tqdm is not None and hasattr(dl, "set_postfix"):
-                        pose_rot = self.state.metrics.ema_rot_update_rms
+                        pose_rot = self.state.abinitio.metrics.ema_rot_update_rms
                         pose_rot_deg = (
                             "n/a"
                             if pose_rot is None
                             else f"{torch.rad2deg(torch.tensor(pose_rot)).item():.2f}"
                         )
-                        pose_trans = self.state.metrics.ema_trans_update_rms
-                        volume_class_change = self.state.metrics.ema_volume_class_change_rate
+                        pose_trans = self.state.abinitio.metrics.ema_trans_update_rms
+                        volume_class_change = self.state.abinitio.metrics.ema_volume_class_change_rate
                         if volume_class_change is None:
-                            volume_class_change = self.state.metrics.volume_class_change_rate
+                            volume_class_change = self.state.abinitio.metrics.volume_class_change_rate
                         dl.set_postfix(
                             OrderedDict(
                                 [
-                                    ("loss", f"{float(self.state.metrics.ema_loss):.3e}"),
+                                    ("loss", f"{float(self._ema_loss):.3e}"),
                                     (
                                         "conf",
-                                        f"{100.0 * float(self.state.metrics.avg_confidence):.2f}%",
+                                        f"{100.0 * float(self._latest_avg_confidence):.2f}%",
                                     ),
                                     (
                                         "cls_chg",
@@ -1366,13 +1500,13 @@ class AbInitioEngine(torch.nn.Module):
                     ).item()
                     epoch_rot_rms_deg = (
                         "n/a"
-                        if self.state.metrics.ema_rot_update_rms is None
-                        else f"{torch.rad2deg(torch.tensor(self.state.metrics.ema_rot_update_rms)).item():.2f}"
+                        if self.state.abinitio.metrics.ema_rot_update_rms is None
+                        else f"{torch.rad2deg(torch.tensor(self.state.abinitio.metrics.ema_rot_update_rms)).item():.2f}"
                     )
                     epoch_trans_rms = (
                         "n/a"
-                        if self.state.metrics.ema_trans_update_rms is None
-                        else f"{float(self.state.metrics.ema_trans_update_rms):.2f}"
+                        if self.state.abinitio.metrics.ema_trans_update_rms is None
+                        else f"{float(self.state.abinitio.metrics.ema_trans_update_rms):.2f}"
                     )
                     epoch_trans_threshold = (
                         f"{self.scheduler._translation_stability_threshold_for_side_length(int(self.state.schedule.side_length)):.2f}"
@@ -1383,19 +1517,19 @@ class AbInitioEngine(torch.nn.Module):
                         title=f"Epoch {epoch} Summary",
                         lines=[
                             f"Pose Search : L={self.state.schedule.side_length}, healpix={self.state.schedule.healpix_order}, trans_extent={self.state.schedule.trans_grid_extent:.2f}, criterion={self.state.schedule.pose_search_criterion}",
-                            f"Resolution  : {float(self.state.metrics.side_length_resolution):.2f} Angstrom",
-                            f"EMA Loss    : {float(self.state.metrics.ema_loss):.6e}",
-                            f"Confidence  : {100.0 * float(self.state.metrics.avg_confidence):.2f}%",
-                            f"Class Confidence : {100.0 * float(self.state.metrics.avg_volume_class_confidence):.2f}%",
-                            f"Class Change : {100.0 * float(self.state.metrics.ema_volume_class_change_rate if self.state.metrics.ema_volume_class_change_rate is not None else self.state.metrics.volume_class_change_rate):.2f}%",
+                            f"Resolution  : {float(self.state.abinitio.metrics.side_length_resolution):.2f} Angstrom",
+                            f"EMA Loss    : {float(self._ema_loss):.6e}",
+                            f"Confidence  : {100.0 * float(self._latest_avg_confidence):.2f}%",
+                            f"Class Confidence : {100.0 * float(self._latest_avg_volume_class_confidence):.2f}%",
+                            f"Class Change : {100.0 * float(self.state.abinitio.metrics.ema_volume_class_change_rate if self.state.abinitio.metrics.ema_volume_class_change_rate is not None else self.state.abinitio.metrics.volume_class_change_rate):.2f}%",
                             *(
                                 []
                                 if volume_occupancy is None
                                 else [f"Occupancy   : {volume_occupancy}"]
                             ),
                             f"Pose RMS    : rot_side={epoch_rot_rms_deg}/{epoch_rot_side_threshold_deg:.2f} deg | rot_healpix={epoch_rot_rms_deg}/{epoch_rot_healpix_threshold_deg:.2f} deg | trans={epoch_trans_rms}/{epoch_trans_threshold} px",
-                            f"Final Epoch : {self.state.schedule.is_final_epoch}",
-                            f"Stop After  : {bool(self.state.progress.has_converged)}",
+                            f"Final Epoch : {self.state.abinitio.engine.is_final_epoch}",
+                            f"Stop After  : {bool(self.state.abinitio.scheduler.has_converged)}",
                         ],
                     )
 
@@ -1419,20 +1553,17 @@ class AbInitioEngine(torch.nn.Module):
                     loop_wall,
                 )
 
-                if bool(self.state.progress.has_converged):
+                if bool(self.state.abinitio.scheduler.has_converged):
                     completed_via_convergence_final_epoch = True
                     if is_rank0():
                         log_block(
                             logger,
                             title="Ab Initio Reconstruction Completed",
-                            lines=[
-                                (
-                                    "Completed immediately after convergence check"
-                                    if stopped_mid_epoch_on_convergence
-                                    else "Completed after finishing the converged epoch"
-                                ),
-                                f"Final EMA loss : {float(self.state.metrics.ema_loss):.6e}",
-                            ],
+                            lines=self._build_completion_log_lines(
+                                "Completed immediately after convergence check"
+                                if stopped_mid_epoch_on_convergence
+                                else "Completed after finishing the converged epoch"
+                            ),
                         )
                     break
 
@@ -1440,10 +1571,9 @@ class AbInitioEngine(torch.nn.Module):
                 log_block(
                     logger,
                     title="Ab Initio Reconstruction Completed",
-                    lines=[
-                        f"Completed all {int(self.config.abinitio.num_epochs)} epochs",
-                        f"Final EMA loss : {float(self.state.metrics.ema_loss):.6e}",
-                    ],
+                    lines=self._build_completion_log_lines(
+                        f"Completed all {int(self.config.abinitio.engine.num_epochs)} epochs"
+                    ),
                 )
             final_map_paths = self.save_final_volume()
             final_map_path = self._format_saved_map_paths(final_map_paths)

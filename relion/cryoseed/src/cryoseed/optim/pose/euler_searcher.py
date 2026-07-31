@@ -46,17 +46,17 @@ class EulerPoseSearcher(torch.nn.Module):
             noise=noise,
             device=device,
             device_mesh=device_mesh,
-            neighbor_steps=config.pose_search.neighbor_steps,
-            trans_grid_samples=config.pose_search.trans_grid_samples,
-            trans_grid_x_shift=config.pose_search.trans_grid_x_shift,
-            trans_grid_y_shift=config.pose_search.trans_grid_y_shift,
-            pose_chunk_factor=config.pose_search.pose_chunk_factor,
-            max_candidates=config.pose_search.max_candidates,
-            criterion_chunk=config.pose_search.criterion_chunk,
-            candidate_select_threshold=config.pose_search.candidate_select_threshold,
-            volume_class_similarity=config.pose_search.volume_class_similarity,
-            volume_class_similarity_scope=config.pose_search.volume_class_similarity_scope,
-            ring_averaged_mse=config.pose_search.ring_averaged_mse,
+            neighbor_steps=config.modules.search.neighbor_steps,
+            trans_grid_samples=config.modules.search.trans_grid_samples,
+            trans_grid_x_shift=config.modules.search.trans_grid_x_shift,
+            trans_grid_y_shift=config.modules.search.trans_grid_y_shift,
+            pose_chunk_factor=config.modules.search.pose_chunk_factor,
+            max_candidates=config.modules.search.max_candidates,
+            criterion_chunk=config.modules.search.criterion_chunk,
+            candidate_select_threshold=config.modules.search.candidate_select_threshold,
+            volume_class_similarity=config.modules.search.volume_class_similarity,
+            volume_class_similarity_scope=config.modules.search.volume_class_similarity_scope,
+            ring_averaged_mse=config.modules.search.ring_averaged_mse,
         )
 
     def __init__(
@@ -469,6 +469,7 @@ class EulerPoseSearcher(torch.nn.Module):
         sel2vol_idx: torch.LongTensor,
         ctf: torch.Tensor | None = None,
         sel2img_idx: torch.LongTensor | None = None,
+        use_grad_proj: bool | None = None,
     ) -> torch.Tensor:
         """Project the 3D Fourier volume into 2D Fourier slices (central slices).
 
@@ -491,19 +492,41 @@ class EulerPoseSearcher(torch.nn.Module):
         K = int(self.volume.num_volumes)
         Q = int(rotation.shape[1])
         L = self.side_length
+        if use_grad_proj is None:
+            use_grad_proj = torch.is_grad_enabled() and bool(
+                getattr(self.volume, "requires_grad", False)
+            )
 
         rotation = rotation.view(1, N * Q, 3, 3).expand(K, -1, -1, -1)  # (K, N * Q, 3, 3)
 
         if self.pose_chunk_factor is not None:
             proj_chunk = math.ceil((self.pose_chunk_factor / L) ** 2 / K)
-            raw_proj = torch.empty(K, N * Q, L, L, dtype=torch.complex64, device=self.device)
-            for chunk_start in range(0, rotation.shape[1], proj_chunk):
-                chunk_end = min(chunk_start + proj_chunk, rotation.shape[1])
-                raw_proj[:, chunk_start:chunk_end] = self.volume.project(
-                    rotation[:, chunk_start:chunk_end], side_length=L
+            if use_grad_proj:
+                raw_proj = torch.cat(
+                    [
+                        self.volume(
+                            rotation[
+                                :,
+                                chunk_start:min(chunk_start + proj_chunk, rotation.shape[1]),
+                            ],
+                            side_length=L,
+                        )
+                        for chunk_start in range(0, rotation.shape[1], proj_chunk)
+                    ],
+                    dim=1,
                 )
+            else:
+                raw_proj = torch.empty(K, N * Q, L, L, dtype=torch.complex64, device=self.device)
+                for chunk_start in range(0, rotation.shape[1], proj_chunk):
+                    chunk_end = min(chunk_start + proj_chunk, rotation.shape[1])
+                    raw_proj[:, chunk_start:chunk_end] = self.volume.project(
+                        rotation[:, chunk_start:chunk_end], side_length=L
+                    )
         else:
-            raw_proj = self.volume.project(rotation, side_length=L)  # (K, N * Q, L, L)
+            if use_grad_proj:
+                raw_proj = self.volume(rotation, side_length=L)
+            else:
+                raw_proj = self.volume.project(rotation, side_length=L)  # (K, N * Q, L, L)
 
         raw_proj = raw_proj.reshape(K * N * Q, L * L)[:, self.valid_pixel_mask]  # (K * N * Q, P)
         if K > 1:
@@ -1349,7 +1372,31 @@ class EulerPoseSearcher(torch.nn.Module):
             particle_index=particle_index,
         )
 
-    def search_grad(
+    def _resolve_search_grad_mode(self, search_grad_mode: str | None) -> str:
+        if search_grad_mode is None:
+            search_grad_mode = str(self.state.schedule.search_grad_mode)
+        if search_grad_mode not in {"full", "selected"}:
+            raise ValueError(
+                f"Unsupported search_grad_mode: {search_grad_mode!r}. "
+                "Expected one of {'full', 'selected'}."
+            )
+        return search_grad_mode
+
+    def _posterior_weight(self, device: torch.device) -> torch.Tensor:
+        R = int(self.R)
+        if self.noise is None:
+            precision = torch.ones((R,), device=device, dtype=torch.float32)
+        else:
+            precision = self.noise.precision[:R].to(device=device, dtype=torch.float32)
+        finite = torch.isfinite(precision)
+        weight_r = torch.zeros_like(precision)
+        weight_r[finite] = 0.5 * precision[finite]
+        weight_r[0] = 0
+        if self.ring_averaged_mse:
+            weight_r = weight_r * self.ring_denom.to(device=device, dtype=weight_r.dtype)
+        return weight_r[self.valid_pixel2ring_idx.to(device=device)].contiguous()
+
+    def _search_grad_full(
         self,
         image: torch.Tensor,
         *,
@@ -1364,50 +1411,6 @@ class EulerPoseSearcher(torch.nn.Module):
         torch.Tensor,
         torch.Tensor | None,
     ]:
-        """Run the differentiable local Euler pose-search route.
-
-        Args:
-            image: Fourier-domain images of shape ``(B, D, D)`` (complex).
-            particle_index: Particle indices of shape ``(B,)``. Used as anchors for local search.
-            ctf: Optional per-image CTF tensor of shape ``(B, D, D)`` (or ``(B, L, L)``).
-                The batch dimension must match ``image.shape[0]`` (no broadcasting).
-
-        Returns:
-            A 7-tuple ``(loss, sel_prob, sel2img_idx, sel2vol_idx, sel_rotmat, sel_trans,
-            sel_radial_residual_power)``, where:
-
-            - loss (torch.Tensor): Differentiable data term averaged over the batch.
-            - sel_prob (torch.Tensor): Selected hypothesis weights with shape ``(N_sel,)``.
-              Candidates are grouped by image index (``sel2img_idx``) and re-normalized within
-              each image after selection.
-            - sel2img_idx (torch.LongTensor): Image indices for each selected hypothesis with shape
-              ``(N_sel,)``.
-            - sel2vol_idx (torch.LongTensor): Volume/class indices for each selected hypothesis with
-              shape ``(N_sel,)``.
-            - sel_rotmat (torch.Tensor): Rotation matrices for each selected hypothesis with shape
-              ``(N_sel, 3, 3)``.
-            - sel_trans (torch.Tensor): 2D translations (in pixels) for each selected hypothesis
-              with shape ``(N_sel, 2)``.
-            - sel_radial_residual_power (torch.Tensor | None): Optional per-hypothesis radial
-              residual power with shape ``(N_sel, side_length // 2 + 1)``. Returned only when
-              noise estimation is enabled and full backprojection is disabled.
-        """
-        if self.state.schedule.pose_search_scope != "local":
-            raise ValueError(
-                f"pose_search_scope {self.state.schedule.pose_search_scope} is not supported."
-            )
-        criterion = self.state.schedule.pose_search_criterion
-        if criterion != "posterior":
-            raise ValueError(
-                "Euler pose search only supports pose_search_criterion='posterior'"
-            )
-        if int(self.num_oversampling) != 0:
-            raise ValueError("Euler differentiable pose search does not support oversampling > 0")
-        if particle_index is None:
-            raise ValueError("particle_index is required for Euler pose search")
-        if self.pose is None:
-            raise ValueError("pose is required for Euler pose search")
-
         device = self.device
         image = image.to(device)
         B = int(image.shape[0])
@@ -1462,72 +1465,53 @@ class EulerPoseSearcher(torch.nn.Module):
         self.current_trans_healpix_order = self.base_trans_healpix_order
         sel_radial_residual_power = None
 
-        with torch.enable_grad():
-            neighbor_steps = int(self.neighbor_steps)
-            img_idx = torch.arange(B, device=device, dtype=torch.long)
+        neighbor_steps = int(self.neighbor_steps)
+        img_idx = torch.arange(B, device=device, dtype=torch.long)
+        quat, rotmat = self._expand_current_rot_neighbors(
+            quaternion, neighbor_steps=neighbor_steps
+        )
+        trans = self._expand_current_trans_neighbors(
+            translation, neighbor_steps=neighbor_steps
+        )
 
-            quat, rotmat = self._expand_current_rot_neighbors(
-                quaternion, neighbor_steps=neighbor_steps
-            )  # (B, Q, 4), (B, Q, 3, 3)
-            trans = self._expand_current_trans_neighbors(
-                translation, neighbor_steps=neighbor_steps
-            )  # (B, T, 2)
+        Q = int(quat.shape[1])
+        T = int(trans.shape[1])
+        KQ = K * Q
 
-            Q = int(quat.shape[1])
-            T = int(trans.shape[1])
+        proj_image = self._project_local(rotmat, ctf=ctf)
+        trans_image = self._translate(image, trans, img_idx=img_idx)
 
-            proj_image = self._project_local(rotmat, ctf=ctf)  # (B, K * Q, P)
-            trans_image = self._translate(image, trans, img_idx=img_idx)  # (B, T, P)
+        hypo2img_idx = (
+            torch.arange(B, device=device)
+            .view(B, 1, 1, 1)
+            .expand(-1, K, Q, T)
+            .reshape(-1)
+        )
+        hypo2vol_idx = (
+            torch.arange(K, device=device)
+            .view(1, K, 1, 1)
+            .expand(B, -1, Q, T)
+            .reshape(-1)
+        )
+        hypo2rot_idx = (
+            torch.arange(B * Q, device=device, dtype=torch.long)
+            .view(B, 1, Q, 1)
+            .expand(-1, K, -1, T)
+            .reshape(-1)
+        )
+        hypo2trans_idx = (
+            torch.arange(B * T, device=device, dtype=torch.long)
+            .view(B, 1, 1, T)
+            .expand(-1, K, Q, -1)
+            .reshape(-1)
+        )
 
-            R = int(self.R)
-            if self.noise is None:
-                precision = torch.ones((R,), device=device, dtype=torch.float32)
-            else:
-                precision = self.noise.precision[:R].to(device=device, dtype=torch.float32)
-            finite = torch.isfinite(precision)
-            weight_r = torch.zeros_like(precision)
-            weight_r[finite] = 0.5 * precision[finite]
-            weight_r[0] = 0
-            if self.ring_averaged_mse:
-                weight_r = weight_r * self.ring_denom.to(device=device, dtype=weight_r.dtype)
-            weight = weight_r[self.valid_pixel2ring_idx.to(device=device)].contiguous()
-
-            mse = spectral_mse_loss(
-                proj_image,
+        with torch.no_grad():
+            hypo_prob = self._evaluate(
+                proj_image.detach(),
                 trans_image,
-                weight=weight,
-                reduction="none",
-                spectral_reduction="sum",
-            ).view(B, K, Q, T)
-            mse_flat = mse.reshape(B, K * Q * T)
-            nll_per_image = math.log(K * Q * T) - torch.logsumexp(-mse_flat, dim=-1)
-            loss = nll_per_image.mean()
-
-            hypo_prob = torch.softmax(-mse_flat, dim=-1).reshape(-1)
-            hypo_dev = hypo_prob.device
-            hypo2img_idx = (
-                torch.arange(B, device=hypo_dev)
-                .view(B, 1, 1, 1)
-                .expand(-1, K, Q, T)
-                .reshape(-1)
-            )
-            hypo2vol_idx = (
-                torch.arange(K, device=hypo_dev)
-                .view(1, K, 1, 1)
-                .expand(B, -1, Q, T)
-                .reshape(-1)
-            )
-            hypo2rot_idx = (
-                torch.arange(B * Q, device=hypo_dev, dtype=torch.long)
-                .view(B, 1, Q, 1)
-                .expand(-1, K, -1, T)
-                .reshape(-1)
-            )
-            hypo2trans_idx = (
-                torch.arange(B * T, device=hypo_dev, dtype=torch.long)
-                .view(B, 1, 1, T)
-                .expand(-1, K, Q, -1)
-                .reshape(-1)
+                num_images=B,
+                hypo2img_idx=hypo2img_idx,
             )
             hypo_prob = self._apply_volume_class_similarity(
                 hypo_prob=hypo_prob,
@@ -1536,7 +1520,6 @@ class EulerPoseSearcher(torch.nn.Module):
                 num_images=B,
                 num_volumes=K,
             )
-
             sel_prob, sel2img_idx, sel_payload = self._select_by_prob(
                 hypo_prob=hypo_prob,
                 hypo2img_idx=hypo2img_idx,
@@ -1550,9 +1533,21 @@ class EulerPoseSearcher(torch.nn.Module):
             sel2rot_idx = sel_payload["rot"]
             sel2trans_idx = sel_payload["trans"]
 
-            sel_quat = quat.view(B * Q, -1)[sel2rot_idx]
-            sel_trans = trans.view(B * T, -1)[sel2trans_idx]
-            sel_rotmat = quaternion_to_matrix(sel_quat).to(self.device)
+        weight = self._posterior_weight(device)
+        full_mse = spectral_mse_loss(
+            proj_image,
+            trans_image,
+            weight=weight,
+            reduction="none",
+            spectral_reduction="sum",
+        )
+        loss = (
+            math.log(KQ * T) - torch.logsumexp(-full_mse.reshape(B, KQ * T), dim=1)
+        ).mean()
+
+        sel_quat = quat.view(B * Q, -1)[sel2rot_idx]
+        sel_trans = trans.view(B * T, -1)[sel2trans_idx]
+        sel_rotmat = quaternion_to_matrix(sel_quat).to(self.device)
 
         (
             best_vol_idx,
@@ -1584,11 +1579,11 @@ class EulerPoseSearcher(torch.nn.Module):
 
         if self.noise is not None and not self.state.schedule.full_backprojection:
             with torch.no_grad():
-                proj_flat = proj_image.reshape(B * (K * Q), -1)
+                proj_flat = proj_image.reshape(B * KQ, -1)
                 trans_flat = trans_image.reshape(B * T, -1)
                 local_rot_idx = sel2rot_idx % Q
                 local_trans_idx = sel2trans_idx % T
-                sel2proj_flat_idx = sel2img_idx * (K * Q) + sel2vol_idx * Q + local_rot_idx
+                sel2proj_flat_idx = sel2img_idx * KQ + sel2vol_idx * Q + local_rot_idx
                 sel2trans_flat_idx = sel2img_idx * T + local_trans_idx
                 sel_radial_residual_power = radial_residual_power(
                     proj_flat,
@@ -1611,6 +1606,288 @@ class EulerPoseSearcher(torch.nn.Module):
             sel_radial_residual_power,
         )
 
+    def _search_grad_selected(
+        self,
+        image: torch.Tensor,
+        *,
+        particle_index: torch.LongTensor,
+        ctf: torch.Tensor | None = None,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.LongTensor,
+        torch.LongTensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
+    ]:
+        device = self.device
+        image = image.to(device)
+        B = int(image.shape[0])
+        K = int(self.volume.num_volumes)
+
+        particle_index = particle_index.to(device=self.pose.device, dtype=torch.long)
+        quaternion = self.pose.quaternion(particle_index)
+        translation = self.pose.translation(particle_index).detach().to(
+            device=device,
+            dtype=self.pose.trans.dtype,
+        )
+
+        quaternion = self._normalize_anchor_batch(
+            quaternion,
+            batch_size=B,
+            width=4,
+            name="quaternion",
+            dtype=torch.float32,
+        )
+        quaternion = F.normalize(quaternion, dim=-1)
+        translation = self._normalize_anchor_batch(
+            translation,
+            batch_size=B,
+            width=2,
+            name="translation",
+            dtype=self.pose.trans.dtype,
+        )
+
+        if int(particle_index.shape[0]) != B:
+            raise ValueError(
+                f"particle_index batch must match image batch: expected B={B}, "
+                f"got {int(particle_index.shape[0])}"
+            )
+
+        if ctf is not None:
+            if not isinstance(ctf, torch.Tensor):
+                ctf = torch.as_tensor(ctf)
+            if ctf.ndim == 2:
+                ctf = ctf.unsqueeze(0)
+            if ctf.ndim != 3:
+                raise ValueError(
+                    f"ctf must have shape (B, D, D) or (B, L, L), got {tuple(ctf.shape)}"
+                )
+            if int(ctf.shape[0]) != B:
+                raise ValueError(
+                    f"ctf batch must match image batch: expected B={B}, got ctf.shape[0]={int(ctf.shape[0])} "
+                    f"with full shape {tuple(ctf.shape)}"
+                )
+            ctf = ctf.to(device)
+
+        self.current_healpix_order = self.base_healpix_order
+        self.current_trans_healpix_order = self.base_trans_healpix_order
+        sel_radial_residual_power = None
+
+        neighbor_steps = int(self.neighbor_steps)
+        img_idx = torch.arange(B, device=device, dtype=torch.long)
+
+        with torch.no_grad():
+            quat, rotmat = self._expand_current_rot_neighbors(
+                quaternion, neighbor_steps=neighbor_steps
+            )
+            trans = self._expand_current_trans_neighbors(
+                translation, neighbor_steps=neighbor_steps
+            )
+
+            Q = int(quat.shape[1])
+            T = int(trans.shape[1])
+
+            proj_image = self._project_local(rotmat, ctf=ctf)
+            trans_image = self._translate(image, trans, img_idx=img_idx)
+            hypo2img_idx = (
+                torch.arange(B, device=device)
+                .view(B, 1, 1, 1)
+                .expand(-1, K, Q, T)
+                .reshape(-1)
+            )
+
+            hypo_prob = self._evaluate(
+                proj_image,
+                trans_image,
+                num_images=B,
+                hypo2img_idx=hypo2img_idx,
+            )
+            hypo2vol_idx = (
+                torch.arange(K, device=device)
+                .view(1, K, 1, 1)
+                .expand(B, -1, Q, T)
+                .reshape(-1)
+            )
+            hypo2rot_idx = (
+                torch.arange(B * Q, device=device, dtype=torch.long)
+                .view(B, 1, Q, 1)
+                .expand(-1, K, -1, T)
+                .reshape(-1)
+            )
+            hypo2trans_idx = (
+                torch.arange(B * T, device=device, dtype=torch.long)
+                .view(B, 1, 1, T)
+                .expand(-1, K, Q, -1)
+                .reshape(-1)
+            )
+            hypo_prob = self._apply_volume_class_similarity(
+                hypo_prob=hypo_prob,
+                hypo2img_idx=hypo2img_idx,
+                hypo2vol_idx=hypo2vol_idx,
+                num_images=B,
+                num_volumes=K,
+            )
+
+            sel_prob, sel2img_idx, sel_payload = self._select_by_prob(
+                hypo_prob=hypo_prob,
+                hypo2img_idx=hypo2img_idx,
+                payload={
+                    "vol": hypo2vol_idx,
+                    "rot": hypo2rot_idx,
+                    "trans": hypo2trans_idx,
+                },
+            )
+            sel2vol_idx = sel_payload["vol"]
+            sel2rot_idx = sel_payload["rot"]
+            sel2trans_idx = sel_payload["trans"]
+
+            sel_quat = quat.view(B * Q, -1)[sel2rot_idx]
+            sel_trans = trans.view(B * T, -1)[sel2trans_idx]
+            sel_rotmat = quaternion_to_matrix(sel_quat).to(self.device)
+
+        weight = self._posterior_weight(device)
+
+        N_sel = int(sel_prob.numel())
+        sel_proj_image = self._project_oversampling(
+            sel_rotmat.view(N_sel, 1, 3, 3),
+            sel2vol_idx=sel2vol_idx,
+            ctf=ctf,
+            sel2img_idx=sel2img_idx,
+            use_grad_proj=True,
+        )
+        proj_flat = sel_proj_image.view(N_sel, -1)
+        trans_flat = trans_image.reshape(B * T, -1)
+        sel2proj_flat_idx = torch.arange(N_sel, device=device, dtype=torch.long)
+        local_trans_idx = sel2trans_idx % T
+        sel2trans_flat_idx = sel2img_idx * T + local_trans_idx
+        sel_mse = spectral_mse_loss(
+            proj_flat,
+            trans_flat,
+            weight=weight,
+            input_indices=sel2proj_flat_idx,
+            target_indices=sel2trans_flat_idx,
+            reduction="none",
+            spectral_reduction="sum",
+        )
+        loss = torch.zeros((), device=sel_mse.device, dtype=sel_mse.dtype)
+        for img_idx_value in range(B):
+            mask = sel2img_idx == img_idx_value
+            loss = loss + (
+                math.log(K * Q * T) - torch.logsumexp(-sel_mse[mask], dim=0)
+            )
+        loss = loss / max(B, 1)
+
+        (
+            best_vol_idx,
+            best_quat,
+            best_trans,
+            best_confidence,
+            best_volume_class_confidence,
+        ) = self._select_best_per_image(
+            B=B,
+            sel_prob=sel_prob,
+            sel2img_idx=sel2img_idx,
+            sel2vol_idx=sel2vol_idx,
+            sel_quat=sel_quat,
+            sel_trans=sel_trans,
+        )
+
+        self.current_healpix_order = self.base_healpix_order
+        self.current_trans_healpix_order = self.base_trans_healpix_order
+
+        with torch.no_grad():
+            self.pose.accumulate(
+                particle_index,
+                quaternion=best_quat,
+                translation=best_trans,
+                volume_index=best_vol_idx,
+                confidence=best_confidence,
+                volume_class_confidence=best_volume_class_confidence,
+            )
+
+        if self.noise is not None and not self.state.schedule.full_backprojection:
+            with torch.no_grad():
+                sel_radial_residual_power = radial_residual_power(
+                    proj_flat,
+                    trans_flat,
+                    input_indices=sel2proj_flat_idx,
+                    target_indices=sel2trans_flat_idx,
+                    side_length=int(self.side_length),
+                    max_radius=int(self.R) - 1,
+                    ndim=2,
+                    use_cache=True,
+                )
+
+        return (
+            loss,
+            sel_prob,
+            sel2img_idx,
+            sel2vol_idx,
+            sel_rotmat,
+            sel_trans,
+            sel_radial_residual_power,
+        )
+
+    def search_grad(
+        self,
+        image: torch.Tensor,
+        *,
+        particle_index: torch.LongTensor,
+        ctf: torch.Tensor | None = None,
+        search_grad_mode: str | None = None,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.LongTensor,
+        torch.LongTensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
+    ]:
+        """Run the differentiable local Euler pose-search route.
+
+        ``search_grad_mode`` selects between two explicit training routes:
+
+        - ``"full"``: build the full gradient path from the initial local
+          projection onward and optimize the original full NLL.
+        - ``"selected"``: first run the regular local posterior search under
+          ``torch.no_grad()``, then reproject only the selected hypotheses on
+          the gradient path and optimize the selected truncated NLL surrogate.
+
+        When ``search_grad_mode`` is ``None``, the route is taken from
+        ``state.schedule.search_grad_mode``.
+        """
+        if self.state.schedule.pose_search_scope != "local":
+            raise ValueError(
+                f"pose_search_scope {self.state.schedule.pose_search_scope} is not supported."
+            )
+        criterion = self.state.schedule.pose_search_criterion
+        if criterion != "posterior":
+            raise ValueError(
+                "Euler pose search only supports pose_search_criterion='posterior'"
+            )
+        if int(self.num_oversampling) != 0:
+            raise ValueError("Euler differentiable pose search does not support oversampling > 0")
+        if particle_index is None:
+            raise ValueError("particle_index is required for Euler pose search")
+        if self.pose is None:
+            raise ValueError("pose is required for Euler pose search")
+
+        resolved_mode = self._resolve_search_grad_mode(search_grad_mode)
+        if resolved_mode == "full":
+            return self._search_grad_full(
+                image,
+                particle_index=particle_index,
+                ctf=ctf,
+            )
+        return self._search_grad_selected(
+            image,
+            particle_index=particle_index,
+            ctf=ctf,
+        )
+
     def search(
         self,
         image: torch.Tensor,
@@ -1618,6 +1895,7 @@ class EulerPoseSearcher(torch.nn.Module):
         particle_index: torch.LongTensor,
         ctf: torch.Tensor | None = None,
         mode: str = "auto",
+        search_grad_mode: str | None = None,
     ):
         """Dispatch to the gradient-enabled or no-grad Euler search route.
 
@@ -1630,6 +1908,9 @@ class EulerPoseSearcher(torch.nn.Module):
                 ``"no_grad"`` dispatches to :meth:`search_no_grad`, and ``"auto"``
                 dispatches to :meth:`search_grad` when autograd is enabled and the
                 volume requires gradients.
+            search_grad_mode: Optional differentiable route override passed
+                through to :meth:`search_grad`. ``"full"`` uses the full-NLL
+                route and ``"selected"`` uses the selected reprojection route.
 
         Returns:
             The return value of the selected search route.
@@ -1639,6 +1920,7 @@ class EulerPoseSearcher(torch.nn.Module):
                 image,
                 particle_index=particle_index,
                 ctf=ctf,
+                search_grad_mode=search_grad_mode,
             )
         if mode == "auto":
             if torch.is_grad_enabled() and bool(getattr(self.volume, "requires_grad", False)):
@@ -1646,6 +1928,7 @@ class EulerPoseSearcher(torch.nn.Module):
                     image,
                     particle_index=particle_index,
                     ctf=ctf,
+                    search_grad_mode=search_grad_mode,
                 )
             return self.search_no_grad(
                 image,

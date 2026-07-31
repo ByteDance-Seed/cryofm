@@ -212,12 +212,16 @@ def log_state(
     state: Any,
     *,
     title: str = "State",
+    command: str | None = None,
     rank0_only: bool = True,
 ) -> None:
     if rank0_only and not is_rank0():
         return
 
-    payload_obj = state.to_dict() if hasattr(state, "to_dict") and callable(getattr(state, "to_dict")) else state
+    if hasattr(state, "to_dict") and callable(getattr(state, "to_dict")):
+        payload_obj = state.to_dict(command=command)
+    else:
+        payload_obj = state
     if isinstance(payload_obj, dict):
         payload_obj = dict(payload_obj)
         progress = payload_obj.get("progress")

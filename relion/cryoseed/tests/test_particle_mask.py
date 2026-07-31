@@ -129,9 +129,9 @@ def _make_solver_and_batch(
     config.data.image_size = 10
     config.data.angpix = 2.0
     config.data.particle_diameter = 8.0
-    config.data.particle_mask.enabled = mask_enabled
-    config.data.particle_mask.zero_mask = zero_mask
-    config.data.particle_mask.soft_edge_pixels = 2.0
+    config.modules.search.particle_mask.enabled = mask_enabled
+    config.modules.search.particle_mask.zero_mask = zero_mask
+    config.modules.search.particle_mask.soft_edge_pixels = 2.0
 
     torch.manual_seed(4)
     image_real = torch.randn((1, 10, 10), dtype=torch.float32)
@@ -186,5 +186,5 @@ def test_noise_masking_requires_noise_estimation():
         with_noise_model=False,
     )
 
-    with pytest.raises(ValueError, match="statistics.use_noise"):
+    with pytest.raises(ValueError, match="modules\\.statistics\\.noise\\.enabled"):
         solver.infer(batch)

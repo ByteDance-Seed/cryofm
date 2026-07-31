@@ -8,5 +8,6 @@ data:
   num_workers: 4
   particle_diameter: 200
 
-reconstruction:
-  num_volumes: 1
+modules:
+  volume:
+    num_volumes: 1

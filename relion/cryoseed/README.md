@@ -54,8 +54,9 @@ cryoSeed supports multiple usage modes depending on the level of control and cus
 
 The most flexible way to use cryoSeed is to build a reconstruction workflow directly in Python. This mode is intended for advanced users and method developers who want fine-grained control over the reconstruction procedure and its individual components.
 
+The example below keeps the pipeline explicit in Python rather than loading an external YAML file. Core objects are initialized directly from named variables, and the EM loop uses `HEALPixPoseSearcher` directly.
+
 ```python
-from cryoseed.config import MainConfig
 from cryoseed.data import ParticleDataset, build_half_dataloaders
 from cryoseed.fft.fft_torch import primal_to_fourier_3d
 from cryoseed.modules.pose import Pose
@@ -63,7 +64,7 @@ from cryoseed.modules.statistics import NoiseVariance, PriorVariance
 from cryoseed.modules.volume import VoxelGrid
 from cryoseed.metrics.fsc import calc_fsc, fsc_to_resolution
 from cryoseed.optim import EMSolver
-from cryoseed.optim.pose import PoseSearcher
+from cryoseed.optim.pose import HEALPixPoseSearcher
 from cryoseed.state import OptimState
 
 import mrcfile
@@ -78,13 +79,11 @@ class NaiveScheduler:
         side_length_step=2,
         max_side_length=None,
         healpix_step_every=2,
-        switch_to_euler_order=4,
     ):
         self.state = state
         self.side_length_step = int(side_length_step)
         self.max_side_length = None if max_side_length is None else int(max_side_length)
         self.healpix_step_every = int(healpix_step_every)
-        self.switch_to_euler_order = int(switch_to_euler_order)
 
     def step(self):
         next_side_length = int(self.state.schedule.side_length) + self.side_length_step
@@ -95,38 +94,60 @@ class NaiveScheduler:
         if (self.state.progress.epoch + 1) % self.healpix_step_every == 0:
             self.state.schedule.healpix_order += 1
 
-        if self.state.schedule.healpix_order >= self.switch_to_euler_order:
-            self.state.schedule.pose_search_scope = "local"
-            self.state.schedule.pose_search_strategy = "euler"
-        else:
-            self.state.schedule.pose_search_scope = "global"
-            self.state.schedule.pose_search_strategy = "healpix"
-
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(42)
 
     # This demo shows a minimal cryo-EM homogeneous refinement loop based on EM.
-    config = MainConfig.from_file("minimal_config.yaml")
+    star_path = "path/to/particles.star"
+    data_path = "path/to/particle_stack_dir"
+    ref_volume_path = "path/to/reference_volume.mrc"
+
+    image_size = 256
+    angpix = 1.5
+    num_particles = 100_000
+    batch_size = 8
+    num_workers = 0
+    num_epochs = 5
+
+    init_lowpass_angstrom = 20.0
+    init_healpix_order = 3
+    trans_grid_samples = 5
+    use_projection_cache = False
+    noise_enabled = True
+    prior_enabled = True
+
+    default_optic_params = {
+        "voltage_kv": 300.0,
+        "spherical_aberration_mm": 2.7,
+        "amplitude_contrast": 0.1,
+        "ctf_bfactor": 0.0,
+        "ctf_scale": 1.0,
+        "phase_shift_deg": 0.0,
+    }
+    default_particle_params = {
+        "defocus_u_angstrom": 15_000.0,
+        "defocus_v_angstrom": 15_000.0,
+        "defocus_angle_deg": 0.0,
+    }
 
     # Build the particle dataset and split it into two halves for gold-standard refinement.
     dataset = ParticleDataset(
-        star_path=config.io.star_path,
-        data_prefix=config.io.data_path,
-        num_particles=config.data.num_particles,
-        image_size=config.data.image_size,
-        angpix=config.data.angpix,
-        default_optic_params=config.data.default_optic_params,
-        default_particle_params=config.data.default_particle_params,
+        star_path=star_path,
+        data_prefix=data_path,
+        num_particles=num_particles,
+        image_size=image_size,
+        angpix=angpix,
+        default_optic_params=default_optic_params,
+        default_particle_params=default_particle_params,
     )
-    dataset.populate_data_config(config.data)
 
     dl_half0, dl_half1, _, _ = build_half_dataloaders(
         dataset,
-        batch_size=config.data.batch_size,
+        batch_size=batch_size,
         shuffle=False,
-        num_workers=config.data.num_workers,
+        num_workers=num_workers,
         device=device,
         seed=42,
         drop_last=False,
@@ -134,46 +155,26 @@ def main():
 
     # The shared state stores the current search resolution / schedule for both halves.
     state = OptimState()
-    state.schedule.healpix_order = int(config.pose_search.init_healpix_order)
-    state.schedule.proj_cache_backend = "memory" if config.scheduler.use_cache else "none"
+    state.schedule.healpix_order = init_healpix_order
+    state.schedule.trans_grid_samples = trans_grid_samples
+    state.schedule.proj_cache_backend = (
+        "memory" if use_projection_cache else "none"
+    )
     state.schedule.side_length = max(
         8,
-        2 * int(config.data.image_size * config.data.angpix / config.homorefine.init_lowpass_angstrom),
+        2 * int(image_size * angpix / init_lowpass_angstrom),
     )
 
     # Each half keeps its own volume, noise model, and pose estimates.
-    volume_half0 = VoxelGrid(
-        grid_size=config.data.image_size,
-        device=device,
-    )
-    volume_half1 = VoxelGrid(
-        grid_size=config.data.image_size,
-        device=device,
-    )
-    noise_half0 = NoiseVariance(
-        image_size=config.data.image_size,
-        device=device,
-    )
-    noise_half1 = NoiseVariance(
-        image_size=config.data.image_size,
-        device=device,
-    )
-    prior = None
-    if config.statistics.use_prior:
-        prior = PriorVariance(
-            image_size=config.data.image_size,
-            device=device,
-        )
-    pose_half0 = Pose(
-        num_particles=config.data.num_particles,
-        device=device,
-    )
-    pose_half1 = Pose(
-        num_particles=config.data.num_particles,
-        device=device,
-    )
+    volume_half0 = VoxelGrid(grid_size=image_size, device=device)
+    volume_half1 = VoxelGrid(grid_size=image_size, device=device)
+    noise_half0 = NoiseVariance(image_size=image_size, device=device) if noise_enabled else None
+    noise_half1 = NoiseVariance(image_size=image_size, device=device) if noise_enabled else None
+    prior = PriorVariance(image_size=image_size, device=device) if prior_enabled else None
+    pose_half0 = Pose(num_particles=num_particles, device=device)
+    pose_half1 = Pose(num_particles=num_particles, device=device)
 
-    with mrcfile.open(config.io.ref_volume_path, permissive=True) as mrc:
+    with mrcfile.open(ref_volume_path, permissive=True) as mrc:
         ref_volume = torch.tensor(mrc.data, device=device).unsqueeze(0)
     ref_volume_fourier = primal_to_fourier_3d(ref_volume)
 
@@ -182,43 +183,40 @@ def main():
     volume_half1.load_volume(ref_volume_fourier)
 
     # Initialize the optional statistics modules before entering the EM loop.
-    if config.statistics.use_noise:
+    if noise_half0 is not None:
         noise_half0.from_data([dl_half0, dl_half1])
-    if config.statistics.use_noise:
+    if noise_half1 is not None and noise_half0 is not None:
         noise_half1.load_state_dict(noise_half0.state_dict())
     if prior is not None:
         prior.from_volume(ref_volume_fourier)
 
-    searcher_half0 = PoseSearcher(
+    searcher_half0 = HEALPixPoseSearcher(
         state=state,
         volume=volume_half0,
         noise=noise_half0,
         pose=pose_half0,
-        config=config,
         device=device,
+        trans_grid_samples=trans_grid_samples,
     )
-    searcher_half1 = PoseSearcher(
+    searcher_half1 = HEALPixPoseSearcher(
         state=state,
         volume=volume_half1,
         noise=noise_half1,
         pose=pose_half1,
-        config=config,
         device=device,
+        trans_grid_samples=trans_grid_samples,
     )
     solver_half0 = EMSolver(state=state, pose_searcher=searcher_half0, prior=prior)
     solver_half1 = EMSolver(state=state, pose_searcher=searcher_half1, prior=prior)
     scheduler = NaiveScheduler(
         state,
         side_length_step=2,
-        max_side_length=config.data.image_size,
+        max_side_length=image_size,
         healpix_step_every=2,
-        switch_to_euler_order=4,
     )
 
-    for epoch in range(config.homorefine.num_epochs):
+    for epoch in range(num_epochs):
         state.progress.epoch = epoch
-        state.metrics.confidence_sum = 0.0
-        state.metrics.confidence_count = 0
 
         # Reset accumulation buffers for the new EM iteration.
         solver_half0.zero_accum()
@@ -246,12 +244,16 @@ def main():
         vol0 = volume_half0.volume_real[0].detach().cpu().numpy()
         vol1 = volume_half1.volume_real[0].detach().cpu().numpy()
         fsc_scores, fsc_freqs = calc_fsc(vol0, vol1)
-        state.metrics.fsc_scores = torch.as_tensor(fsc_scores, dtype=torch.float32, device=device)
-        state.metrics.fsc_resolution = fsc_to_resolution(
+        state.homorefine.metrics.fsc_scores = torch.as_tensor(
+            fsc_scores,
+            dtype=torch.float32,
+            device=device,
+        )
+        state.homorefine.metrics.fsc_resolution = fsc_to_resolution(
             fsc_scores,
             fsc_freqs,
-            threshold=config.homorefine.fsc_threshold,
-            voxel_size=config.data.angpix,
+            threshold=0.143,
+            angpix=angpix,
         )
         scheduler.step()
 
@@ -259,11 +261,10 @@ def main():
             f"epoch={epoch} "
             f"half0_shape={tuple(volume_half0.volume.shape)} "
             f"half1_shape={tuple(volume_half1.volume.shape)} "
-            f"avg_confidence={state.metrics.avg_confidence:.4f} "
-            f"resolution={state.metrics.fsc_resolution:.2f}A "
+            f"avg_confidence={state.homorefine.metrics.avg_confidence:.4f} "
+            f"resolution={state.homorefine.metrics.fsc_resolution:.2f}A "
             f"next_L={state.schedule.side_length} "
-            f"next_healpix={state.schedule.healpix_order} "
-            f"next_strategy={state.schedule.pose_search_strategy}"
+            f"next_healpix={state.schedule.healpix_order}"
         )
 
 

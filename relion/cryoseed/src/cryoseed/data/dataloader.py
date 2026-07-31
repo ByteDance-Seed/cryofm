@@ -17,7 +17,7 @@ The API is intentionally split into two layers:
   build the dataset internally.
 """
 
-from typing import Any
+from typing import Any, Callable
 
 import torch
 
@@ -31,6 +31,7 @@ __all__ = [
     "build_dataloader",
     "build_distributed_dataloader",
     "build_distributed_sampler",
+    "single_thread_worker_init_fn",
     "split_dataset_in_half",
     "split_dataset_debug",
     "build_half_dataloaders",
@@ -40,6 +41,22 @@ __all__ = [
     "build_distributed_half_dataloaders_from_star",
     "build_debug_distributed_half_dataloaders_from_star",
 ]
+
+
+def single_thread_worker_init_fn(worker_id: int) -> None:
+    """Keep DataLoader workers single-threaded for CPU-side FFT/CTF work.
+
+    This reduces oversubscription and avoids forking into a multithreaded CPU
+    runtime state when worker-side collate functions invoke ``torch.fft`` and
+    other native kernels.
+    """
+    del worker_id
+    torch.set_num_threads(1)
+    try:
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        # PyTorch allows setting inter-op threads only before the pool is used.
+        pass
 
 
 def build_dataset(
@@ -158,6 +175,8 @@ def build_dataloader(
     generator: torch.Generator | None = None,
     sampler: Sampler | None = None,
     drop_last: bool = True,
+    worker_init_fn: Callable[[int], None] | None = None,
+    multiprocessing_context: str | None = None,
 ) -> DataLoader:
     """Build a standard :class:`torch.utils.data.DataLoader`.
 
@@ -174,6 +193,9 @@ def build_dataloader(
         generator: RNG generator used by the loader.
         sampler: Custom sampler. When provided, ``shuffle`` is disabled.
         drop_last: Drop the last incomplete batch.
+        worker_init_fn: Optional worker initialization hook.
+        multiprocessing_context: Optional multiprocessing start method such as
+            ``"spawn"``. Only used when ``num_workers > 0``.
 
     Returns:
         Loader yielding :class:`~cryoseed.data.DataBatch`.
@@ -195,6 +217,10 @@ def build_dataloader(
 
     if num_workers > 0:
         kwargs["prefetch_factor"] = prefetch_factor
+        if worker_init_fn is not None:
+            kwargs["worker_init_fn"] = worker_init_fn
+        if multiprocessing_context is not None:
+            kwargs["multiprocessing_context"] = multiprocessing_context
 
     if generator is not None:
         kwargs["generator"] = generator
@@ -213,6 +239,8 @@ def build_distributed_dataloader(
     device: torch.device | None = None,
     seed: int = 42,
     drop_last: bool = True,
+    worker_init_fn: Callable[[int], None] | None = None,
+    multiprocessing_context: str | None = None,
     device_mesh=None,
 ) -> tuple[DataLoader, DistributedSampler]:
     """Build a distributed dataloader and its sampler for a dataset.
@@ -227,6 +255,9 @@ def build_distributed_dataloader(
         device: If CUDA, enables ``pin_memory``.
         seed: RNG seed used by the distributed sampler.
         drop_last: Whether to drop the last incomplete batch.
+        worker_init_fn: Optional worker initialization hook.
+        multiprocessing_context: Optional multiprocessing start method such as
+            ``"spawn"``.
         device_mesh: Device mesh used to infer rank and world size.
 
     Returns:
@@ -250,6 +281,8 @@ def build_distributed_dataloader(
         pin_memory=pin_memory,
         sampler=sampler,
         drop_last=drop_last,
+        worker_init_fn=worker_init_fn,
+        multiprocessing_context=multiprocessing_context,
     )
     return dataloader, sampler
 

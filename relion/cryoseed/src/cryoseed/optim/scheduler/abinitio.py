@@ -26,7 +26,7 @@ class AbInitioScheduler:
         trans_extent_scale=3.0,
         increase_radius_step=1,
         auto_local_healpix_order=4,
-        auto_local_assignment_change_threshold=0.05,
+        auto_local_assignment_change_threshold=1.0,
         target_side_length_resolution=10.0,
         target_healpix_order=None,
         full_backprojection=False,
@@ -63,29 +63,33 @@ class AbInitioScheduler:
         self.image_size = int(config.data.image_size)
         self.angpix = float(config.data.angpix)
         self.particle_diameter = config.data.particle_diameter
-        self.trans_grid_samples = int(config.pose_search.trans_grid_samples)
-        self.confidence_threshold = float(config.scheduler.confidence_threshold)
-        self.convergence_patience = int(config.scheduler.convergence_patience)
+        self.trans_grid_samples = int(config.modules.search.trans_grid_samples)
+        self.confidence_threshold = float(config.abinitio.scheduler.confidence_threshold)
+        self.convergence_patience = int(config.abinitio.scheduler.convergence_patience)
         self.pose_rotation_stability_factor = float(
-            config.abinitio.pose_rotation_stability_factor
+            config.abinitio.scheduler.pose_rotation_stability_factor
         )
         self.pose_translation_stability_factor = float(
-            config.abinitio.pose_translation_stability_factor
+            config.abinitio.scheduler.pose_translation_stability_factor
         )
-        self.trans_extent_scale = float(config.scheduler.trans_extent_scale)
-        self.increase_radius_step = int(config.scheduler.increase_radius_step)
-        self.auto_local_healpix_order = int(config.scheduler.auto_local_healpix_order)
+        self.trans_extent_scale = float(config.abinitio.scheduler.trans_extent_scale)
+        self.increase_radius_step = int(config.abinitio.scheduler.increase_radius_step)
+        self.auto_local_healpix_order = int(
+            config.abinitio.scheduler.auto_local_healpix_order
+        )
         self.auto_local_assignment_change_threshold = float(
-            config.scheduler.auto_local_assignment_change_threshold
+            config.abinitio.scheduler.auto_local_assignment_change_threshold
         )
         self.target_side_length_resolution = float(
-            config.abinitio.target_side_length_resolution
+            config.abinitio.scheduler.target_side_length_resolution
         )
-        target_healpix_order = config.abinitio.target_healpix_order
+        target_healpix_order = config.abinitio.scheduler.target_healpix_order
         self.target_healpix_order = (
             None if target_healpix_order is None else int(target_healpix_order)
         )
-        self.default_full_backprojection = bool(config.reconstruction.full_backprojection)
+        self.default_full_backprojection = bool(
+            config.modules.volume.full_backprojection
+        )
         derived_target_healpix_order = self._required_healpix_order_for_resolution(
             self.target_side_length_resolution
         )
@@ -105,7 +109,7 @@ class AbInitioScheduler:
 
     def _apply_execution_flags(self) -> None:
         if self.auto_local_healpix_order < 2:
-            raise ValueError("scheduler.auto_local_healpix_order must be >= 2")
+            raise ValueError("abinitio.scheduler.auto_local_healpix_order must be >= 2")
         if int(self.state.schedule.healpix_order) >= int(self.auto_local_healpix_order):
             self.state.schedule.pose_search_scope = "local"
             self.state.schedule.pose_search_strategy = "euler"
@@ -121,13 +125,20 @@ class AbInitioScheduler:
         self.state.schedule.full_backprojection = (
             self.default_full_backprojection
         )
-        self.state.schedule.skip_external_reconstruct = bool(
-            self.state.schedule.is_final_epoch
+        self.state.abinitio.engine.skip_external_reconstruct = bool(
+            self.state.abinitio.engine.is_final_epoch
         )
 
     def _sync_learning_rate_decay_flag(self) -> None:
-        self.state.schedule.activate_learning_rate_decay = bool(
-            self.state.metrics.avg_confidence >= self.confidence_threshold
+        self.state.abinitio.solver.activate_learning_rate_decay = bool(
+            self.state.abinitio.metrics.avg_confidence >= self.confidence_threshold
+        )
+
+    def _sync_search_grad_mode(self) -> None:
+        self.state.schedule.search_grad_mode = (
+            "selected"
+            if self.state.abinitio.metrics.avg_confidence > self.confidence_threshold
+            else "full"
         )
 
     def _side_length_to_resolution(self, side_length: int) -> float:
@@ -168,7 +179,9 @@ class AbInitioScheduler:
         if self.angpix is None or float(self.angpix) <= 0:
             raise ValueError("data.angpix must be set to a positive value")
         if self.target_side_length_resolution <= 0:
-            raise ValueError("abinitio.target_side_length_resolution must be > 0")
+            raise ValueError(
+                "abinitio.scheduler.target_side_length_resolution must be > 0"
+            )
 
         target_side_length = int(
             math.ceil(
@@ -235,9 +248,9 @@ class AbInitioScheduler:
 
     def _sync_pose_centered_translation_grid(self, *, first_activation: bool) -> None:
         if self.trans_grid_samples <= 0:
-            raise ValueError("pose_search.trans_grid_samples must be > 0")
+            raise ValueError("modules.search.trans_grid_samples must be > 0")
         if self.trans_extent_scale < 0:
-            raise ValueError("scheduler.trans_extent_scale must be >= 0")
+            raise ValueError("abinitio.scheduler.trans_extent_scale must be >= 0")
         if self.angpix is None or float(self.angpix) <= 0:
             raise ValueError("data.angpix must be set to a positive value")
 
@@ -323,7 +336,7 @@ class AbInitioScheduler:
         target_side_length = self._target_side_length()
         current_side_length = int(self.state.schedule.side_length)
         current_radius = max(1, current_side_length // 2)
-        if self.state.metrics.avg_confidence > self.confidence_threshold:
+        if self.state.abinitio.metrics.avg_confidence > self.confidence_threshold:
             proposed_next_side_length = self._min_side_length_for_healpix_order(
                 int(self.state.schedule.healpix_order) + 1
             )
@@ -350,15 +363,15 @@ class AbInitioScheduler:
         return int(next_side_length)
 
     def _reset_stability_counts(self) -> None:
-        self.state.progress.num_checks_with_stable_side_length = 0
-        self.state.progress.num_checks_with_stable_pose = 0
-        self.state.progress.num_checks_ready_to_stop = 0
-        self.state.progress.has_converged = False
+        self.state.abinitio.scheduler.num_checks_with_stable_side_length = 0
+        self.state.abinitio.scheduler.num_checks_with_stable_pose = 0
+        self.state.abinitio.scheduler.num_checks_ready_to_stop = 0
+        self.state.abinitio.scheduler.has_converged = False
 
     def local_volume_class_change_rate(self) -> float:
-        volume_class_change_rate = self.state.metrics.ema_volume_class_change_rate
+        volume_class_change_rate = self.state.abinitio.metrics.ema_volume_class_change_rate
         if volume_class_change_rate is None:
-            volume_class_change_rate = self.state.metrics.volume_class_change_rate
+            volume_class_change_rate = self.state.abinitio.metrics.volume_class_change_rate
         return float(volume_class_change_rate)
 
     def local_entry_blocked(self) -> bool:
@@ -382,7 +395,7 @@ class AbInitioScheduler:
         if next_healpix_order > current_healpix_order:
             if self.auto_local_assignment_change_threshold < 0:
                 raise ValueError(
-                    "scheduler.auto_local_assignment_change_threshold must be >= 0"
+                    "abinitio.scheduler.auto_local_assignment_change_threshold must be >= 0"
                 )
             if (
                 self._is_local_entry_transition(next_healpix_order)
@@ -395,7 +408,7 @@ class AbInitioScheduler:
             self._reset_stability_counts()
             return True
         if self.target_healpix_order is not None:
-            self.state.schedule.healpix_terminal_reached = True
+            self.state.abinitio.scheduler.healpix_terminal_reached = True
         return False
 
     def _advance_side_length(self) -> bool:
@@ -403,9 +416,9 @@ class AbInitioScheduler:
         if next_side_length <= int(self.state.schedule.side_length):
             return False
         self.state.schedule.side_length = int(next_side_length)
-        self.state.schedule.initial_healpix_alignment_done = True
+        self.state.abinitio.scheduler.initial_healpix_alignment_done = True
         self._sync_trans_grid_samples_for_current_schedule()
-        self.state.metrics.side_length_resolution = self._side_length_to_resolution(
+        self.state.abinitio.metrics.side_length_resolution = self._side_length_to_resolution(
             int(self.state.schedule.side_length)
         )
         self._reset_stability_counts()
@@ -413,18 +426,18 @@ class AbInitioScheduler:
 
     def _update_stability_state(self) -> tuple[bool, bool, bool, bool]:
         if self.convergence_patience < 1:
-            raise ValueError("scheduler.convergence_patience must be >= 1")
+            raise ValueError("abinitio.scheduler.convergence_patience must be >= 1")
         if self.pose_rotation_stability_factor < 0:
             raise ValueError(
-                "abinitio.pose_rotation_stability_factor must be >= 0"
+                "abinitio.scheduler.pose_rotation_stability_factor must be >= 0"
             )
         if self.pose_translation_stability_factor < 0:
             raise ValueError(
-                "abinitio.pose_translation_stability_factor must be >= 0"
+                "abinitio.scheduler.pose_translation_stability_factor must be >= 0"
             )
 
-        ema_rot_update_rms = self.state.metrics.ema_rot_update_rms
-        ema_trans_update_rms = self.state.metrics.ema_trans_update_rms
+        ema_rot_update_rms = self.state.abinitio.metrics.ema_rot_update_rms
+        ema_trans_update_rms = self.state.abinitio.metrics.ema_trans_update_rms
         rotation_stable = (
             ema_rot_update_rms is not None
             and float(ema_rot_update_rms) <= self._rotation_stability_threshold()
@@ -441,22 +454,24 @@ class AbInitioScheduler:
         )
         side_length_stable = side_length_rotation_stable and translation_stable
         if side_length_stable:
-            self.state.progress.num_checks_with_stable_side_length += 1
+            self.state.abinitio.scheduler.num_checks_with_stable_side_length += 1
         else:
-            self.state.progress.num_checks_with_stable_side_length = 0
+            self.state.abinitio.scheduler.num_checks_with_stable_side_length = 0
 
         pose_stable = side_length_stable
         if pose_stable:
-            self.state.progress.num_checks_with_stable_pose += 1
+            self.state.abinitio.scheduler.num_checks_with_stable_pose += 1
         else:
-            self.state.progress.num_checks_with_stable_pose = 0
+            self.state.abinitio.scheduler.num_checks_with_stable_pose = 0
 
         side_length_target_reached = (
-            self.state.metrics.side_length_resolution is not None
-            and float(self.state.metrics.side_length_resolution)
+            self.state.abinitio.metrics.side_length_resolution is not None
+            and float(self.state.abinitio.metrics.side_length_resolution)
             <= self.target_side_length_resolution
         )
-        healpix_terminal_reached = bool(self.state.schedule.healpix_terminal_reached)
+        healpix_terminal_reached = bool(
+            self.state.abinitio.scheduler.healpix_terminal_reached
+        )
         healpix_ready_for_side_length = (
             int(self.state.schedule.healpix_order)
             >= self._required_healpix_order_for_side_length(
@@ -472,67 +487,62 @@ class AbInitioScheduler:
             and pose_stable
         )
         if final_stable:
-            self.state.progress.num_checks_ready_to_stop += 1
+            self.state.abinitio.scheduler.num_checks_ready_to_stop += 1
         else:
-            self.state.progress.num_checks_ready_to_stop = 0
-        self.state.progress.has_converged = (
-            self.state.progress.num_checks_ready_to_stop >= self.convergence_patience
+            self.state.abinitio.scheduler.num_checks_ready_to_stop = 0
+        self.state.abinitio.scheduler.has_converged = (
+            self.state.abinitio.scheduler.num_checks_ready_to_stop
+            >= self.convergence_patience
         )
         return side_length_stable, rotation_stable, pose_stable, final_stable
 
     def step(self):
         """Advance the ab initio scheduling state at a checkpoint."""
         self.local_entry_blocked_last_step = False
+        self._sync_search_grad_mode()
         self._sync_learning_rate_decay_flag()
-        self.state.metrics.side_length_resolution = self._side_length_to_resolution(
+        self.state.abinitio.metrics.side_length_resolution = self._side_length_to_resolution(
             int(self.state.schedule.side_length)
         )
         self._sync_trans_grid_samples_for_current_schedule()
         required_healpix_order_for_side_length = self._required_healpix_order_for_side_length(
             int(self.state.schedule.side_length)
         )
-        if not bool(self.state.schedule.initial_healpix_alignment_done):
+        if not bool(self.state.abinitio.scheduler.initial_healpix_alignment_done):
             if int(self.state.schedule.healpix_order) < required_healpix_order_for_side_length:
                 if self._advance_healpix_order():
                     self._apply_execution_flags()
-                    self.state.metrics.confidence_sum = 0.0
-                    self.state.metrics.confidence_count = 0
-                    self.state.metrics.volume_class_confidence_sum = 0.0
-                    self.state.metrics.volume_class_confidence_count = 0
                     return
-            self.state.schedule.initial_healpix_alignment_done = True
+            self.state.abinitio.scheduler.initial_healpix_alignment_done = True
 
         _, rotation_stable, _, _ = self._update_stability_state()
         side_length_ready = (
-            self.state.progress.num_checks_with_stable_side_length >= self.convergence_patience
+            self.state.abinitio.scheduler.num_checks_with_stable_side_length
+            >= self.convergence_patience
         )
         healpix_ready_for_side_length = (
             int(self.state.schedule.healpix_order) >= required_healpix_order_for_side_length
         )
         side_length_target_reached = (
-            self.state.metrics.side_length_resolution is not None
-            and float(self.state.metrics.side_length_resolution)
+            self.state.abinitio.metrics.side_length_resolution is not None
+            and float(self.state.abinitio.metrics.side_length_resolution)
             <= self.target_side_length_resolution
         )
 
-        if bool(self.state.progress.has_converged) and not bool(
-            self.state.schedule.is_final_epoch
+        if bool(self.state.abinitio.scheduler.has_converged) and not bool(
+            self.state.abinitio.engine.is_final_epoch
         ):
-            self.state.schedule.is_final_epoch = True
+            self.state.abinitio.engine.is_final_epoch = True
         elif not healpix_ready_for_side_length:
             if rotation_stable:
                 self._advance_healpix_order()
         elif side_length_ready:
             if side_length_target_reached:
                 if (
-                    not bool(self.state.schedule.healpix_terminal_reached)
+                    not bool(self.state.abinitio.scheduler.healpix_terminal_reached)
                     and rotation_stable
                 ):
                     self._advance_healpix_order()
             else:
                 self._advance_side_length()
         self._apply_execution_flags()
-        self.state.metrics.confidence_sum = 0.0
-        self.state.metrics.confidence_count = 0
-        self.state.metrics.volume_class_confidence_sum = 0.0
-        self.state.metrics.volume_class_confidence_count = 0

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,21 @@ from cryoseed.config import MainConfig
 from cryoseed.state import OptimState
 
 
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _assert_command_yaml_shape(raw: dict, *, command: str) -> None:
+    other_command = "homorefine" if command == "abinitio" else "abinitio"
+    assert command in raw
+    assert other_command not in raw
+    assert "modules" in raw
+    if command == "abinitio":
+        assert "use_cache" not in raw["abinitio"]["scheduler"]
+        assert "increase_radius_aggressive_factor" not in raw["abinitio"]["scheduler"]
+        assert "external_reconstruct" not in raw["abinitio"]["engine"]
+
+
 def test_abinitio_cli_loads_command_defaults():
     parser = build_parser()
     args = parser.parse_args(["abinitio"])
@@ -16,19 +32,36 @@ def test_abinitio_cli_loads_command_defaults():
     cfg = MainConfig.from_cli_args(args)
 
     assert args.command == "abinitio"
-    assert cfg.scheduler.schedule_check_interval_iters == 100
-    assert cfg.scheduler.confidence_threshold == 0.5
-    assert cfg.pose_search.oversampling_deduplicate is False
-    assert cfg.homorefine.first_epoch_ncc is True
-    assert cfg.abinitio.num_epochs == 1000
-    assert cfg.abinitio.init_particles_per_volume == 100
-    assert cfg.abinitio.target_side_length_resolution == 10.0
-    assert cfg.abinitio.target_healpix_order is None
-    assert cfg.abinitio.learning_rate_decay == 0.9995
-    assert cfg.abinitio.pose_rotation_stability_factor == 1.0
-    assert cfg.abinitio.pose_translation_stability_factor == 0.5
-    assert cfg.abinitio.solvent_mask == "none"
-    assert cfg.pose_search.init_trans_grid_extent is None
+    assert cfg.abinitio.scheduler.schedule_check_interval_iters == 100
+    assert cfg.abinitio.scheduler.confidence_threshold == 0.5
+    assert cfg.abinitio.engine.num_epochs == 1000
+    assert cfg.abinitio.scheduler.target_side_length_resolution == 10.0
+    assert cfg.abinitio.engine.solvent_mask == "none"
+    assert cfg.modules.search.init_trans_grid_extent is None
+
+
+def test_abinitio_cli_help_only_exposes_leaf_config_flags():
+    parser = build_parser()
+    subparsers_action = next(
+        action
+        for action in parser._actions
+        if isinstance(action, argparse._SubParsersAction)
+    )
+    abinitio_parser = subparsers_action.choices["abinitio"]
+    option_strings = {
+        option
+        for action in abinitio_parser._actions
+        for option in action.option_strings
+    }
+
+    assert "--num-volumes" in option_strings
+    assert "--learning-rate" in option_strings
+    assert "--volume" not in option_strings
+    assert "--search" not in option_strings
+    assert "--statistics" not in option_strings
+    assert "--engine" not in option_strings
+    assert "--solver" not in option_strings
+    assert "--scheduler" not in option_strings
 
 
 def test_init_trans_grid_extent_null_auto_derives_from_image_size():
@@ -36,24 +69,22 @@ def test_init_trans_grid_extent_null_auto_derives_from_image_size():
     args = parser.parse_args(["abinitio", "--image-size", "200"])
 
     cfg = MainConfig.from_cli_args(args)
-    state = OptimState.from_config(cfg)
+    state = OptimState.from_config(cfg, command="abinitio")
 
-    assert cfg.pose_search.init_trans_grid_extent is None
+    assert cfg.modules.search.init_trans_grid_extent is None
     assert state.schedule.trans_grid_extent == 100.0
 
 
 def test_command_defaults_yaml_only_lists_supported_fields():
-    root = Path(__file__).resolve().parents[1]
+    root = _repo_root()
     homorefine_path = root / "src" / "cryoseed" / "config" / "defaults" / "homorefine.yaml"
     abinitio_path = root / "src" / "cryoseed" / "config" / "defaults" / "abinitio.yaml"
 
     homorefine_raw = MainConfig._load_file(str(homorefine_path))
     abinitio_raw = MainConfig._load_file(str(abinitio_path))
 
-    assert "abinitio" not in homorefine_raw
-    assert "use_cache" not in abinitio_raw["scheduler"]
-    assert "increase_radius_aggressive_factor" not in abinitio_raw["scheduler"]
-    assert "homorefine" not in abinitio_raw
+    _assert_command_yaml_shape(homorefine_raw, command="homorefine")
+    _assert_command_yaml_shape(abinitio_raw, command="abinitio")
 
 
 @pytest.mark.parametrize(
@@ -71,59 +102,16 @@ def test_command_cli_rejects_hidden_flags(argv):
         parser.parse_args(argv)
 
 
-@pytest.mark.parametrize(
-    ("command", "config_text", "error_match"),
-    [
-        (
-            "abinitio",
-            "scheduler:\n  use_cache: true\n",
-            "abinitio does not support scheduler.use_cache",
-        ),
-        (
-            "abinitio",
-            "scheduler:\n  increase_radius_aggressive_factor: 0.5\n",
-            "abinitio does not support scheduler.increase_radius_aggressive_factor",
-        ),
-        (
-            "abinitio",
-            "reconstruction:\n  external_reconstruct: true\n",
-            "abinitio does not support reconstruction.external_reconstruct",
-        ),
-    ],
-)
-def test_command_config_rejects_fixed_field_overrides(
-    tmp_path,
-    command,
-    config_text,
-    error_match,
-):
-    config_path = tmp_path / f"{command}.yaml"
-    config_path.write_text(
-        config_text,
-        encoding="utf-8",
-    )
-
-    parser = build_parser()
-    args = parser.parse_args([command, "--config", str(config_path)])
-
-    with pytest.raises(
-        ValueError,
-        match=error_match,
-    ):
-        MainConfig.from_cli_args(args)
-
-
 def test_full_config_loads():
-    full_config_path = Path(__file__).resolve().parents[1] / "full_config.yaml"
+    full_config_path = _repo_root() / "full_config.yaml"
     cfg = MainConfig.from_file(str(full_config_path))
 
-    assert cfg.homorefine.first_epoch_ncc is True
-    assert cfg.scheduler.schedule_check_interval_iters == 100
-    assert cfg.abinitio.target_side_length_resolution == 10.0
+    assert cfg.homorefine.scheduler.first_epoch_ncc is True
+    assert cfg.abinitio.scheduler.schedule_check_interval_iters == 100
 
 
 def test_full_config_lists_full_schema():
-    full_config_path = Path(__file__).resolve().parents[1] / "full_config.yaml"
+    full_config_path = _repo_root() / "full_config.yaml"
     raw = MainConfig._load_file(str(full_config_path))
 
     assert raw == MainConfig().to_dict()
@@ -134,17 +122,17 @@ def test_full_config_lists_full_schema():
         (
             "abinitio",
             "scheduler:\n  use_cache: true\n",
-            "abinitio does not support scheduler.use_cache",
+            "Unknown config section `scheduler`.",
         ),
         (
             "abinitio",
             "scheduler:\n  increase_radius_aggressive_factor: 0.5\n",
-            "abinitio does not support scheduler.increase_radius_aggressive_factor",
+            "Unknown config section `scheduler`.",
         ),
         (
             "abinitio",
             "reconstruction:\n  external_reconstruct: true\n",
-            "abinitio does not support reconstruction.external_reconstruct",
+            "Unknown config section `reconstruction`.",
         ),
     ],
 )
@@ -166,7 +154,5 @@ def test_save_output_config_only_prints_supported_fields(tmp_path):
     homorefine_raw = MainConfig._load_file(str(homorefine_path))
     abinitio_raw = MainConfig._load_file(str(abinitio_path))
 
-    assert "abinitio" not in homorefine_raw
-    assert "use_cache" not in abinitio_raw["scheduler"]
-    assert "increase_radius_aggressive_factor" not in abinitio_raw["scheduler"]
-    assert "homorefine" not in abinitio_raw
+    _assert_command_yaml_shape(homorefine_raw, command="homorefine")
+    _assert_command_yaml_shape(abinitio_raw, command="abinitio")

@@ -84,7 +84,7 @@ class _Searcher:
 
 def _make_solver():
     config = MainConfig()
-    config.homorefine.first_epoch_ncc = True
+    config.homorefine.scheduler.first_epoch_ncc = True
     state = OptimState()
     state.progress.epoch = 0
     state.schedule.side_length = 8
