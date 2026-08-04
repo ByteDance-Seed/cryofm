@@ -740,7 +740,7 @@ class HomoRefineEngine(torch.nn.Module):
     def _external_prior_variance(self) -> torch.Tensor:
         """Return the prior variance spectrum exported to the external tool."""
         if self.prior is not None:
-            return self.prior.variance.detach().clone()
+            return self.prior.variance.detach().clone().squeeze(0)
         return torch.full(
             (self.config.data.image_size // 2 + 1,),
             float(self.config.modules.statistics.prior.init_variance),

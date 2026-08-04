@@ -1326,6 +1326,7 @@ class EulerPoseSearcher(torch.nn.Module):
         *,
         particle_index: torch.LongTensor,
         ctf: torch.Tensor | None = None,
+        fixed_volume_index: torch.LongTensor | None = None,
     ) -> tuple[torch.Tensor, torch.LongTensor, torch.LongTensor, torch.Tensor, torch.Tensor]:
         """Run local pose search (plus oversampling refinement).
 
@@ -1356,6 +1357,10 @@ class EulerPoseSearcher(torch.nn.Module):
               Unit convention: translations are expressed in pixels of the *input* Fourier grid
               (``D = image.shape[-1]``) and are not scaled by the current ``side_length``.
         """
+        if fixed_volume_index is not None:
+            raise NotImplementedError(
+                "fixed-volume search is currently supported only by HEALPix search"
+            )
         if particle_index is None:
             raise ValueError("particle_index is required for Euler pose search")
         particle_index = particle_index.to(device=self.pose.device, dtype=torch.long)
@@ -1837,6 +1842,7 @@ class EulerPoseSearcher(torch.nn.Module):
         particle_index: torch.LongTensor,
         ctf: torch.Tensor | None = None,
         search_grad_mode: str | None = None,
+        fixed_volume_index: torch.LongTensor | None = None,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
@@ -1859,6 +1865,10 @@ class EulerPoseSearcher(torch.nn.Module):
         When ``search_grad_mode`` is ``None``, the route is taken from
         ``state.schedule.search_grad_mode``.
         """
+        if fixed_volume_index is not None:
+            raise NotImplementedError(
+                "fixed-volume search is currently supported only by HEALPix search"
+            )
         if self.state.schedule.pose_search_scope != "local":
             raise ValueError(
                 f"pose_search_scope {self.state.schedule.pose_search_scope} is not supported."
@@ -1896,6 +1906,7 @@ class EulerPoseSearcher(torch.nn.Module):
         ctf: torch.Tensor | None = None,
         mode: str = "auto",
         search_grad_mode: str | None = None,
+        fixed_volume_index: torch.LongTensor | None = None,
     ):
         """Dispatch to the gradient-enabled or no-grad Euler search route.
 
@@ -1915,6 +1926,10 @@ class EulerPoseSearcher(torch.nn.Module):
         Returns:
             The return value of the selected search route.
         """
+        if fixed_volume_index is not None:
+            raise NotImplementedError(
+                "fixed-volume search is currently supported only by HEALPix search"
+            )
         if mode == "grad":
             return self.search_grad(
                 image,

@@ -9,6 +9,7 @@ from cryoseed.config import MainConfig
 from cryoseed.config.config import (
     AbInitioConfig,
     DataConfig,
+    HeteroRefineConfig,
     HomoRefineConfig,
     IOConfig,
     LoggingConfig,
@@ -231,6 +232,10 @@ _FIELD_HELP_BY_PATH: dict[tuple[str, ...], str] = {
     ("abinitio", "scheduler", "pose_translation_stability_factor"): (
         "Scale factor applied to the current translation-grid spacing when testing translational pose stability."
     ),
+    ("heterorefine", "scheduler", "pose_translation_center_mode"): (
+        "Translation-center mode for pose search: 'auto' and 'always' center on "
+        "stored pose translations, while 'never' starts from zero."
+    ),
     ("homorefine", "engine", "num_epochs"): (
         "Number of homogeneous-refinement epochs."
     ),
@@ -315,6 +320,9 @@ _CLI_ARG_KWARGS_BY_PATH: dict[tuple[str, ...], dict[str, Any]] = {
     ("abinitio", "scheduler", "pose_translation_center_mode"): {
         "choices": ("auto", "always", "never"),
     },
+    ("heterorefine", "scheduler", "pose_translation_center_mode"): {
+        "choices": ("auto", "always", "never"),
+    },
     ("homorefine", "scheduler", "pose_translation_center_mode"): {
         "choices": ("auto", "always", "never"),
     },
@@ -359,6 +367,7 @@ def _build_leaf_help(spec: dict[str, Any]) -> str:
 
 
 from cryoseed.engines.abinitio import AbInitioEngine
+from cryoseed.engines.heterorefine import HeteroRefineEngine
 from cryoseed.engines.homorefine import HomoRefineEngine
 from cryoseed.runtime.distributed import cleanup_runtime, setup_runtime
 
@@ -455,6 +464,7 @@ def _add_nested_config_overrides(
     ]
     command_sections = {
         "abinitio": ("abinitio", AbInitioConfig),
+        "heterorefine": ("heterorefine", HeteroRefineConfig),
         "homorefine": ("homorefine", HomoRefineConfig),
     }
     specs: list[dict[str, Any]] = []
@@ -646,21 +656,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Resume from output_path/checkpoints/latest.pt if it exists; otherwise start fresh.",
         )
 
-    homorefine = subparsers.add_parser(
-        "homorefine",
-        help="Run homogeneous refinement",
-        description=(
-            "Run homogeneous refinement.\n\n"
-            "Precedence: CLI options > user config file > command defaults > built-in defaults.\n"
-            "The config file is optional.\n"
-            "Options not provided on the command line fall back to the user config file,\n"
-            "then to command defaults, and finally to built-in defaults."
-        ),
-        formatter_class=_HelpFormatter,
-    )
-    _add_runtime_args(homorefine, command_name="homorefine")
-    _add_nested_config_overrides(homorefine, command="homorefine")
-
     abinitio = subparsers.add_parser(
         "abinitio",
         help="Run ab initio reconstruction",
@@ -676,35 +671,34 @@ def build_parser() -> argparse.ArgumentParser:
     _add_runtime_args(abinitio, command_name="abinitio")
     _add_nested_config_overrides(abinitio, command="abinitio")
 
-    return parser
-
-
-def run_homorefine(args) -> None:
-    config = MainConfig.from_cli_args(args)
-
-    runtime = setup_runtime(
-        data_parallel_size=getattr(args, "data_parallel_size", None),
-        compute_parallel_size=getattr(args, "compute_parallel_size", None),
+    heterorefine = subparsers.add_parser(
+        "heterorefine",
+        help="Run heterogeneous refinement",
+        description=(
+            "Run heterogeneous refinement.\n\n"
+            "Precedence: CLI options > user config file > command defaults > built-in defaults."
+        ),
+        formatter_class=_HelpFormatter,
     )
-    try:
-        if runtime.rank == 0:
-            saved_config_path, snapshot_config_path = config.save_output_config(
-                command="homorefine"
-            )
-            print(
-                f"Saved launch config to {saved_config_path} and timestamped snapshot to {snapshot_config_path}",
-                flush=True,
-            )
+    _add_runtime_args(heterorefine, command_name="heterorefine")
+    _add_nested_config_overrides(heterorefine, command="heterorefine")
 
-        engine = HomoRefineEngine(
-            config=config,
-            runtime=runtime,
-            resume_checkpoint_path=getattr(args, "resume", None),
-            auto_resume=bool(getattr(args, "auto_resume", False)),
-        )
-        engine.run()
-    finally:
-        cleanup_runtime()
+    homorefine = subparsers.add_parser(
+        "homorefine",
+        help="Run homogeneous refinement",
+        description=(
+            "Run homogeneous refinement.\n\n"
+            "Precedence: CLI options > user config file > command defaults > built-in defaults.\n"
+            "The config file is optional.\n"
+            "Options not provided on the command line fall back to the user config file,\n"
+            "then to command defaults, and finally to built-in defaults."
+        ),
+        formatter_class=_HelpFormatter,
+    )
+    _add_runtime_args(homorefine, command_name="homorefine")
+    _add_nested_config_overrides(homorefine, command="homorefine")
+
+    return parser
 
 
 def run_abinitio(args) -> None:
@@ -735,14 +729,70 @@ def run_abinitio(args) -> None:
         cleanup_runtime()
 
 
+def run_heterorefine(args) -> None:
+    config = MainConfig.from_cli_args(args)
+    runtime = setup_runtime(
+        data_parallel_size=getattr(args, "data_parallel_size", None),
+        compute_parallel_size=getattr(args, "compute_parallel_size", None),
+    )
+    try:
+        if runtime.rank == 0:
+            saved_config_path, snapshot_config_path = config.save_output_config(
+                command="heterorefine"
+            )
+            print(
+                f"Saved launch config to {saved_config_path} and timestamped snapshot to {snapshot_config_path}",
+                flush=True,
+            )
+
+        engine = HeteroRefineEngine(
+            config=config,
+            runtime=runtime,
+            resume_checkpoint_path=getattr(args, "resume", None),
+            auto_resume=bool(getattr(args, "auto_resume", False)),
+        )
+        engine.run()
+    finally:
+        cleanup_runtime()
+
+
+def run_homorefine(args) -> None:
+    config = MainConfig.from_cli_args(args)
+
+    runtime = setup_runtime(
+        data_parallel_size=getattr(args, "data_parallel_size", None),
+        compute_parallel_size=getattr(args, "compute_parallel_size", None),
+    )
+    try:
+        if runtime.rank == 0:
+            saved_config_path, snapshot_config_path = config.save_output_config(
+                command="homorefine"
+            )
+            print(
+                f"Saved launch config to {saved_config_path} and timestamped snapshot to {snapshot_config_path}",
+                flush=True,
+            )
+        engine = HomoRefineEngine(
+            config=config,
+            runtime=runtime,
+            resume_checkpoint_path=getattr(args, "resume", None),
+            auto_resume=bool(getattr(args, "auto_resume", False)),
+        )
+        engine.run()
+    finally:
+        cleanup_runtime()
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
-    if args.command == "homorefine":
-        run_homorefine(args)
-    elif args.command == "abinitio":
+    if args.command == "abinitio":
         run_abinitio(args)
+    elif args.command == "heterorefine":
+        run_heterorefine(args)
+    elif args.command == "homorefine":
+        run_homorefine(args)
     else:
         raise ValueError(f"Unknown command: {args.command}")
 

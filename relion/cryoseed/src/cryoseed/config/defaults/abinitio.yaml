@@ -38,6 +38,7 @@ modules:
     num_volumes: 1
     backproject_chunk: 16384
     full_backprojection: false
+
   search:
     init_healpix_order: 0
     neighbor_steps: 2
@@ -59,6 +60,7 @@ modules:
       soft_edge_pixels: 5.0
       protection_disable_epochs: 5
       protection_radius_factor: 2.628260884878466
+
   statistics:
     noise:
       enabled: true
@@ -70,6 +72,7 @@ modules:
       inflated_weight: 2500.0
       inflated_decay: null
       inflated_scale: 8.0
+
     prior:
       enabled: false
       init_variance: 1.0
@@ -86,10 +89,12 @@ abinitio:
     solvent_mask_soft_edge_pixels: 5.0
     loss_ema_decay: 0.9
     pose_rms_ema_decay: 0.9
+
   solver:
     learning_rate: 1.0
     learning_rate_decay: 0.9995
     momentum: 0.9
+
   scheduler:
     schedule_check_interval_iters: 100
     confidence_threshold: 0.5

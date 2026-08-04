@@ -9,7 +9,7 @@ from cryoseed.config import MainConfig
 PoseSearchCriterion = Literal["posterior", "correlation"]
 PoseTranslationCenterMode = Literal["auto", "always", "never"]
 SearchGradMode = Literal["full", "selected"]
-CommandName = Literal["abinitio", "homorefine"]
+CommandName = Literal["abinitio", "heterorefine", "homorefine"]
 _USE_ACTIVE_COMMAND = object()
 
 
@@ -38,7 +38,7 @@ def parse_command_name(value: str | None) -> CommandName | None:
     """Validate and narrow an optional command string."""
     if value is None:
         return None
-    if value not in ("abinitio", "homorefine"):
+    if value not in ("abinitio", "heterorefine", "homorefine"):
         raise ValueError(f"Unknown command: {value}")
     return cast(CommandName, value)
 
@@ -136,6 +136,40 @@ class AbInitioState:
 
 
 @dataclass
+class HeteroRefineEngineState:
+    is_bootstrap_epoch: bool = False
+
+
+@dataclass
+class HeteroRefineSchedulerState:
+    pass
+
+
+@dataclass
+class HeteroRefineMetricsState:
+    avg_confidence: float = 0.0
+    avg_volume_class_confidence: float = 0.0
+    volume_class_change_rate: float = 0.0
+    rot_update_rms: float = 0.0
+    trans_update_rms: float = 0.0
+    volume_occupancy: Any | None = None
+    dvp_crossing_radius: Any | None = None
+    dvp_resolution_per_volume: Any | None = None
+    dvp_radius: float | None = None
+    dvp_resolution: float | None = None
+    side_length_resolution: float | None = None
+
+
+@dataclass
+class HeteroRefineState:
+    engine: HeteroRefineEngineState = field(default_factory=HeteroRefineEngineState)
+    scheduler: HeteroRefineSchedulerState = field(
+        default_factory=HeteroRefineSchedulerState
+    )
+    metrics: HeteroRefineMetricsState = field(default_factory=HeteroRefineMetricsState)
+
+
+@dataclass
 class HomoRefineEngineState:
     is_final_epoch: bool = False
     skip_external_reconstruct: bool = False
@@ -173,6 +207,7 @@ class OptimState:
     progress: ProgressState = field(default_factory=ProgressState)
     schedule: ScheduleState = field(default_factory=ScheduleState)
     abinitio: AbInitioState = field(default_factory=AbInitioState)
+    heterorefine: HeteroRefineState = field(default_factory=HeteroRefineState)
     homorefine: HomoRefineState = field(default_factory=HomoRefineState)
     _active_command: CommandName | None = field(default=None, repr=False)
 
@@ -183,6 +218,8 @@ class OptimState:
         }
         if command in (None, "abinitio"):
             payload["abinitio"] = _to_builtin(self.abinitio)
+        if command in (None, "heterorefine"):
+            payload["heterorefine"] = _to_builtin(self.heterorefine)
         if command in (None, "homorefine"):
             payload["homorefine"] = _to_builtin(self.homorefine)
         return payload
@@ -263,6 +300,29 @@ class OptimState:
             )
         st.abinitio = AbInitioState(**abinitio_kwargs)
 
+        heterorefine_kwargs = cls._filter_dataclass_kwargs(
+            HeteroRefineState, d.get("heterorefine", {})
+        )
+        if "engine" in heterorefine_kwargs:
+            heterorefine_kwargs["engine"] = HeteroRefineEngineState(
+                **cls._filter_dataclass_kwargs(
+                    HeteroRefineEngineState, heterorefine_kwargs["engine"]
+                )
+            )
+        if "scheduler" in heterorefine_kwargs:
+            heterorefine_kwargs["scheduler"] = HeteroRefineSchedulerState(
+                **cls._filter_dataclass_kwargs(
+                    HeteroRefineSchedulerState, heterorefine_kwargs["scheduler"]
+                )
+            )
+        if "metrics" in heterorefine_kwargs:
+            heterorefine_kwargs["metrics"] = HeteroRefineMetricsState(
+                **cls._filter_dataclass_kwargs(
+                    HeteroRefineMetricsState, heterorefine_kwargs["metrics"]
+                )
+            )
+        st.heterorefine = HeteroRefineState(**heterorefine_kwargs)
+
         homorefine_kwargs = cls._filter_dataclass_kwargs(
             HomoRefineState, d.get("homorefine", {})
         )
@@ -302,6 +362,9 @@ class OptimState:
         if normalized_command == "abinitio":
             scheduler_config = config.abinitio.scheduler
             use_cache = False
+        elif normalized_command == "heterorefine":
+            scheduler_config = config.heterorefine.scheduler
+            use_cache = False
         elif normalized_command == "homorefine":
             scheduler_config = config.homorefine.scheduler
             use_cache = bool(config.homorefine.scheduler.use_cache)
@@ -310,6 +373,11 @@ class OptimState:
             use_cache = False
 
         st.schedule.healpix_order = int(config.modules.search.init_healpix_order)
+        if normalized_command == "heterorefine":
+            st.schedule.pose_search_scope = "global"
+            st.schedule.pose_search_strategy = "healpix"
+            st.schedule.oversampling = 0
+            st.schedule.search_grad_mode = "full"
         init_trans_grid_extent = config.modules.search.init_trans_grid_extent
         if init_trans_grid_extent is None:
             if int(config.data.image_size) <= 0:

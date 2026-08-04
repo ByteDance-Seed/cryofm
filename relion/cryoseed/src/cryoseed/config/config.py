@@ -201,6 +201,30 @@ class AbInitioConfig:
 
 
 @dataclass
+class HeteroRefineEngineConfig:
+    num_epochs: int = 25
+    init_lowpass_angstrom: float = 30
+    first_epoch_ncc: bool = True
+    solvent_mask: str = "none"
+    solvent_mask_soft_edge_pixels: float = 5.0
+
+
+@dataclass
+class HeteroRefineSchedulerConfig:
+    increase_radius_step: int = 10
+    dvp_threshold: float = 1.0
+    pose_translation_center_mode: str = "auto"
+
+
+@dataclass
+class HeteroRefineConfig:
+    engine: HeteroRefineEngineConfig = field(default_factory=HeteroRefineEngineConfig)
+    scheduler: HeteroRefineSchedulerConfig = field(
+        default_factory=HeteroRefineSchedulerConfig
+    )
+
+
+@dataclass
 class HomoRefineEngineConfig:
     num_epochs: int = 50
     init_lowpass_angstrom: float = 30
@@ -244,6 +268,7 @@ class MainConfig:
     reproduce: ReproduceConfig = field(default_factory=ReproduceConfig)
     modules: ModulesConfig = field(default_factory=ModulesConfig)
     abinitio: AbInitioConfig = field(default_factory=AbInitioConfig)
+    heterorefine: HeteroRefineConfig = field(default_factory=HeteroRefineConfig)
     homorefine: HomoRefineConfig = field(default_factory=HomoRefineConfig)
 
     def __post_init__(self) -> None:
@@ -322,7 +347,7 @@ class MainConfig:
         data = self.to_dict()
         if not command:
             return data
-        if command not in ("abinitio", "homorefine"):
+        if command not in ("abinitio", "heterorefine", "homorefine"):
             raise ValueError(f"Unknown command: {command}")
         return {
             "io": data["io"],
@@ -531,6 +556,25 @@ class MainConfig:
         return AbInitioConfig(**normalized)
 
     @classmethod
+    def _build_heterorefine(cls, data: Any) -> HeteroRefineConfig:
+        normalized = cls._validate_keys(data, HeteroRefineConfig, path="heterorefine")
+        normalized["engine"] = HeteroRefineEngineConfig(
+            **cls._validate_keys(
+                normalized.get("engine"),
+                HeteroRefineEngineConfig,
+                path="heterorefine.engine",
+            )
+        )
+        normalized["scheduler"] = HeteroRefineSchedulerConfig(
+            **cls._validate_keys(
+                normalized.get("scheduler"),
+                HeteroRefineSchedulerConfig,
+                path="heterorefine.scheduler",
+            )
+        )
+        return HeteroRefineConfig(**normalized)
+
+    @classmethod
     def _build_homorefine(cls, data: Any) -> HomoRefineConfig:
         normalized = cls._validate_keys(data, HomoRefineConfig, path="homorefine")
         normalized["engine"] = HomoRefineEngineConfig(
@@ -565,6 +609,7 @@ class MainConfig:
             reproduce=cls._build_reproduce(normalized.get("reproduce")),
             modules=cls._build_modules(normalized.get("modules")),
             abinitio=cls._build_abinitio(normalized.get("abinitio")),
+            heterorefine=cls._build_heterorefine(normalized.get("heterorefine")),
             homorefine=cls._build_homorefine(normalized.get("homorefine")),
         )
         if base_dir is not None:
@@ -583,6 +628,10 @@ class MainConfig:
                 cfg.io.ssd_cache_root = str((base / cfg.io.ssd_cache_root).resolve())
             cfg.abinitio.engine.solvent_mask = cls._resolve_solvent_mask_path(
                 cfg.abinitio.engine.solvent_mask,
+                base,
+            )
+            cfg.heterorefine.engine.solvent_mask = cls._resolve_solvent_mask_path(
+                cfg.heterorefine.engine.solvent_mask,
                 base,
             )
             cfg.homorefine.engine.solvent_mask = cls._resolve_solvent_mask_path(
@@ -708,6 +757,10 @@ class MainConfig:
             base = Path(base_dir)
             cfg.abinitio.engine.solvent_mask = cls._resolve_solvent_mask_path(
                 cfg.abinitio.engine.solvent_mask,
+                base,
+            )
+            cfg.heterorefine.engine.solvent_mask = cls._resolve_solvent_mask_path(
+                cfg.heterorefine.engine.solvent_mask,
                 base,
             )
             cfg.homorefine.engine.solvent_mask = cls._resolve_solvent_mask_path(

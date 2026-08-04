@@ -40,11 +40,20 @@ class EMSolver(Solver):
     def refresh(self):
         self.pose_searcher.refresh()
 
-    def expectation(self, image, *, particle_index, ctf=None):
+    def expectation(
+        self,
+        image,
+        *,
+        particle_index,
+        ctf=None,
+        fixed_volume_index: torch.LongTensor | None = None,
+    ):
         prob, prob2img_idx, prob2vol_idx, rotmat, trans, radial_residual_power = self.pose_searcher.search(
             image,
             particle_index=particle_index,
             ctf=ctf,
+            mode="no_grad",
+            fixed_volume_index=fixed_volume_index,
         )
         return prob, prob2img_idx, prob2vol_idx, rotmat, trans, radial_residual_power
 
@@ -105,7 +114,12 @@ class EMSolver(Solver):
                     side_length=noise_side_length,
                 )
 
-    def infer(self, batch: DataBatch)-> EMInferResult:
+    def infer(
+        self,
+        batch: DataBatch,
+        *,
+        fixed_volume_index: torch.LongTensor | None = None,
+    )-> EMInferResult:
         image = batch.image
         particle_index = batch.particle_index
         ctf = batch.ctf
@@ -114,6 +128,7 @@ class EMSolver(Solver):
             image,
             particle_index=particle_index,
             ctf=ctf,
+            fixed_volume_index=fixed_volume_index,
         )
         result = EMInferResult(
             image=image,

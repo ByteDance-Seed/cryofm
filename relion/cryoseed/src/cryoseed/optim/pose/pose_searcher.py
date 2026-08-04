@@ -260,6 +260,7 @@ class PoseSearcher(torch.nn.Module):
         *,
         particle_index: torch.LongTensor | None = None,
         ctf=None,
+        fixed_volume_index: torch.LongTensor | None = None,
     ):
         """Preprocess images and run the no-grad pose-search route.
 
@@ -284,11 +285,13 @@ class PoseSearcher(torch.nn.Module):
                 image,
                 particle_index=particle_index,
                 ctf=ctf,
+                fixed_volume_index=fixed_volume_index,
             )
         return self.pose_searcher.search(
             image,
             particle_index=particle_index,
             ctf=ctf,
+            fixed_volume_index=fixed_volume_index,
         )
 
     def search_grad(
@@ -298,6 +301,7 @@ class PoseSearcher(torch.nn.Module):
         particle_index: torch.LongTensor | None = None,
         ctf=None,
         search_grad_mode: str | None = None,
+        fixed_volume_index: torch.LongTensor | None = None,
     ):
         """Preprocess images and run the differentiable pose-search route.
 
@@ -331,6 +335,7 @@ class PoseSearcher(torch.nn.Module):
             particle_index=particle_index,
             ctf=ctf,
             search_grad_mode=search_grad_mode,
+            fixed_volume_index=fixed_volume_index,
         )
 
     def search(
@@ -341,6 +346,7 @@ class PoseSearcher(torch.nn.Module):
         ctf=None,
         mode: str = "auto",
         search_grad_mode: str | None = None,
+        fixed_volume_index: torch.LongTensor | None = None,
     ):
         """Preprocess images and dispatch to the requested pose-search route.
 
@@ -365,6 +371,7 @@ class PoseSearcher(torch.nn.Module):
                 particle_index=particle_index,
                 ctf=ctf,
                 search_grad_mode=search_grad_mode,
+                fixed_volume_index=fixed_volume_index,
             )
         if mode == "auto":
             if torch.is_grad_enabled() and bool(getattr(self.volume, "requires_grad", False)):
@@ -373,17 +380,20 @@ class PoseSearcher(torch.nn.Module):
                     particle_index=particle_index,
                     ctf=ctf,
                     search_grad_mode=search_grad_mode,
+                    fixed_volume_index=fixed_volume_index,
                 )
             return self.search_no_grad(
                 image,
                 particle_index=particle_index,
                 ctf=ctf,
+                fixed_volume_index=fixed_volume_index,
             )
         if mode == "no_grad":
             return self.search_no_grad(
                 image,
                 particle_index=particle_index,
                 ctf=ctf,
+                fixed_volume_index=fixed_volume_index,
             )
         raise ValueError(f"Unsupported search mode: {mode!r}")
 

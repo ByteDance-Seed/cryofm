@@ -1758,6 +1758,83 @@ class HEALPixPoseSearcher(torch.nn.Module):
             best_volume_class_confidence,
         )
 
+    def _prepare_global_hypotheses(
+        self,
+        proj_image: torch.Tensor,
+        *,
+        batch_size: int,
+        num_rotations: int,
+        num_translations: int,
+        fixed_volume_index: torch.LongTensor | None,
+    ) -> tuple[
+        torch.Tensor,
+        torch.LongTensor,
+        torch.LongTensor,
+        torch.LongTensor,
+        torch.LongTensor,
+    ]:
+        """Optionally restrict each image to one volume and build aligned indices."""
+        B = int(batch_size)
+        K = int(self.volume.num_volumes)
+        Q = int(num_rotations)
+        T = int(num_translations)
+        device = proj_image.device
+
+        if fixed_volume_index is None:
+            volume_index = (
+                torch.arange(K, device=device, dtype=torch.long)
+                .view(1, K)
+                .expand(B, -1)
+            )
+            volume_count = K
+        else:
+            fixed_volume_index = torch.as_tensor(
+                fixed_volume_index, device=device, dtype=torch.long
+            )
+            if tuple(fixed_volume_index.shape) != (B,):
+                raise ValueError(
+                    f"fixed_volume_index must have shape ({B},), got "
+                    f"{tuple(fixed_volume_index.shape)}"
+                )
+            if bool(((fixed_volume_index < 0) | (fixed_volume_index >= K)).any()):
+                raise ValueError(f"fixed_volume_index values must be in [0, {K - 1}]")
+            proj_image = proj_image.reshape(B, K, Q, -1)[
+                torch.arange(B, device=device), fixed_volume_index
+            ]
+            volume_index = fixed_volume_index.view(B, 1)
+            volume_count = 1
+
+        hypo2img_idx = (
+            torch.arange(B, device=device)
+            .view(B, 1, 1, 1)
+            .expand(-1, volume_count, Q, T)
+            .reshape(-1)
+        )
+        hypo2vol_idx = (
+            volume_index.view(B, volume_count, 1, 1)
+            .expand(-1, -1, Q, T)
+            .reshape(-1)
+        )
+        hypo2rot_idx = (
+            torch.arange(Q, device=device)
+            .view(1, 1, Q, 1)
+            .expand(B, volume_count, -1, T)
+            .reshape(-1)
+        )
+        hypo2trans_idx = (
+            torch.arange(T, device=device)
+            .view(1, 1, 1, T)
+            .expand(B, volume_count, Q, -1)
+            .reshape(-1)
+        )
+        return (
+            proj_image,
+            hypo2img_idx,
+            hypo2vol_idx,
+            hypo2rot_idx,
+            hypo2trans_idx,
+        )
+
     @torch.no_grad()
     def search_no_grad(
         self,
@@ -1765,6 +1842,7 @@ class HEALPixPoseSearcher(torch.nn.Module):
         *,
         particle_index: torch.LongTensor | None = None,
         ctf: torch.Tensor | None = None,
+        fixed_volume_index: torch.LongTensor | None = None,
     ) -> tuple[
         torch.Tensor,
         torch.LongTensor,
@@ -1886,6 +1964,14 @@ class HEALPixPoseSearcher(torch.nn.Module):
             self.volume_version = current_volume_version
             self._refresh_caches()
 
+        if (
+            fixed_volume_index is not None
+            and self.state.schedule.pose_search_scope != "global"
+        ):
+            raise NotImplementedError(
+                "fixed-volume HEALPix search currently supports only global search"
+            )
+
         if self.state.schedule.pose_search_scope == "global":
             # Global search evaluates a coarse grid over:
             #   volume x SO(3) rotation x 2D translation.
@@ -1901,6 +1987,20 @@ class HEALPixPoseSearcher(torch.nn.Module):
             proj_image = self._project_global(self.base_rot, ctf=ctf)  # shape: (B_or_1, K*Q, P)
             if int(proj_image.shape[0]) == 1:
                 proj_image = proj_image.expand(B, *proj_image.shape[1:])  # shape: (B, K*Q, P)
+            (
+                proj_image,
+                hypo2img_idx,
+                hypo2vol_idx,
+                hypo2rot_idx,
+                hypo2trans_idx,
+            ) = self._prepare_global_hypotheses(
+                proj_image,
+                batch_size=B,
+                num_rotations=Q,
+                num_translations=T,
+                fixed_volume_index=fixed_volume_index,
+            )
+            projections_per_image = int(proj_image.shape[1])
 
             trans = trans_center.view(B, 1, 2) + self.base_trans.view(1, T, 2)  # shape: (B, T, 2)
             trans_image = self._translate_global(image, trans)  # shape: (B, T, P)
@@ -1909,38 +2009,14 @@ class HEALPixPoseSearcher(torch.nn.Module):
                 proj_image,
                 trans_image,
             )  # shape: (B*K*Q*T,)
-            hypo_dev = hypo_prob.device
-            hypo2img_idx = (
-                torch.arange(B, device=hypo_dev)
-                .view(B, 1, 1, 1)
-                .expand(-1, K, Q, T)
-                .reshape(-1)
-            )  # shape: (B*K*Q*T,)
-            hypo2vol_idx = (
-                torch.arange(K, device=hypo_dev)
-                .view(1, K, 1, 1)
-                .expand(B, -1, Q, T)
-                .reshape(-1)
-            )  # shape: (B*K*Q*T,)
-            hypo2rot_idx = (
-                torch.arange(Q, device=hypo_dev)
-                .view(1, 1, Q, 1)
-                .expand(B, K, -1, T)
-                .reshape(-1)
-            )  # shape: (B*K*Q*T,)
-            hypo2trans_idx = (
-                torch.arange(T, device=hypo_dev)
-                .view(1, 1, 1, T)
-                .expand(B, K, Q, -1)
-                .reshape(-1)
-            )  # shape: (B*K*Q*T,)
-            hypo_prob = self._apply_volume_class_similarity(
-                hypo_prob=hypo_prob,
-                hypo2img_idx=hypo2img_idx,
-                hypo2vol_idx=hypo2vol_idx,
-                num_images=B,
-                num_volumes=K,
-            )
+            if fixed_volume_index is None:
+                hypo_prob = self._apply_volume_class_similarity(
+                    hypo_prob=hypo_prob,
+                    hypo2img_idx=hypo2img_idx,
+                    hypo2vol_idx=hypo2vol_idx,
+                    num_images=B,
+                    num_volumes=K,
+                )
 
             sel_prob, sel2img_idx, sel_payload = self._select_by_prob(
                 hypo_prob=hypo_prob,
@@ -1956,9 +2032,16 @@ class HEALPixPoseSearcher(torch.nn.Module):
             sel2trans_idx = sel_payload["trans"]
 
             if self.noise is not None and posterior_search:
-                proj_flat = proj_image.reshape(B * (K * Q), -1)
+                proj_flat = proj_image.reshape(B * projections_per_image, -1)
                 trans_flat = trans_image.reshape(B * T, -1)
-                sel2proj_flat_idx = sel2img_idx * (K * Q) + sel2vol_idx * Q + sel2rot_idx
+                if fixed_volume_index is None:
+                    sel2proj_flat_idx = (
+                        sel2img_idx * projections_per_image
+                        + sel2vol_idx * Q
+                        + sel2rot_idx
+                    )
+                else:
+                    sel2proj_flat_idx = sel2img_idx * Q + sel2rot_idx
                 sel2trans_flat_idx = sel2img_idx * T + sel2trans_idx
 
             sel_quat = self.base_quat[sel2rot_idx]  # (N_sel, 4)
@@ -2204,6 +2287,7 @@ class HEALPixPoseSearcher(torch.nn.Module):
         *,
         particle_index: torch.LongTensor | None = None,
         ctf: torch.Tensor | None = None,
+        fixed_volume_index: torch.LongTensor | None = None,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
@@ -2276,47 +2360,37 @@ class HEALPixPoseSearcher(torch.nn.Module):
         proj_image = self._project_global(self.base_rot, ctf=ctf)
         if int(proj_image.shape[0]) == 1:
             proj_image = proj_image.expand(B, KQ, -1)
+        (
+            proj_image,
+            hypo2img_idx,
+            hypo2vol_idx,
+            hypo2rot_idx,
+            hypo2trans_idx,
+        ) = self._prepare_global_hypotheses(
+            proj_image,
+            batch_size=B,
+            num_rotations=Q,
+            num_translations=T,
+            fixed_volume_index=fixed_volume_index,
+        )
+        projections_per_image = int(proj_image.shape[1])
 
         trans = trans_center.view(B, 1, 2) + self.base_trans.view(1, T, 2)
         trans_image = self._translate_global(image, trans)
-
-        hypo2img_idx = (
-            torch.arange(B, device=device)
-            .view(B, 1, 1, 1)
-            .expand(-1, K, Q, T)
-            .reshape(-1)
-        )
-        hypo2vol_idx = (
-            torch.arange(K, device=device)
-            .view(1, K, 1, 1)
-            .expand(B, -1, Q, T)
-            .reshape(-1)
-        )
-        hypo2rot_idx = (
-            torch.arange(Q, device=device)
-            .view(1, 1, Q, 1)
-            .expand(B, K, -1, T)
-            .reshape(-1)
-        )
-        hypo2trans_idx = (
-            torch.arange(T, device=device)
-            .view(1, 1, 1, T)
-            .expand(B, K, Q, -1)
-            .reshape(-1)
-        )
 
         with torch.no_grad():
             hypo_prob = self._evaluate_broadcast(
                 proj_image.detach(),
                 trans_image,
             )
-            hypo_prob = self._apply_volume_class_similarity(
-                hypo_prob=hypo_prob,
-                hypo2img_idx=hypo2img_idx,
-                hypo2vol_idx=hypo2vol_idx,
-                num_images=B,
-                num_volumes=K,
-            )
+            if fixed_volume_index is None:
+                hypo_prob = self._apply_volume_class_similarity(
+                    hypo_prob=hypo_prob,
+                    hypo2img_idx=hypo2img_idx,
+                    hypo2vol_idx=hypo2vol_idx,
+                    num_images=B,
+                    num_volumes=K,
+                )
             sel_prob, sel2img_idx, sel_payload = self._select_by_prob(
                 hypo_prob=hypo_prob,
                 hypo2img_idx=hypo2img_idx,
@@ -2339,7 +2413,10 @@ class HEALPixPoseSearcher(torch.nn.Module):
             spectral_reduction="sum",
         )
         loss = (
-            math.log(KQ * T) - torch.logsumexp(-full_mse.reshape(B, KQ * T), dim=1)
+            math.log(KQ * T)
+            - torch.logsumexp(
+                -full_mse.reshape(B, projections_per_image * T), dim=1
+            )
         ).mean()
 
         sel_quat = self.base_quat[sel2rot_idx]
@@ -2377,9 +2454,16 @@ class HEALPixPoseSearcher(torch.nn.Module):
 
         if self.noise is not None and not self.state.schedule.full_backprojection:
             with torch.no_grad():
-                proj_flat = proj_image.reshape(B * KQ, -1)
+                proj_flat = proj_image.reshape(B * projections_per_image, -1)
                 trans_flat = trans_image.reshape(B * T, -1)
-                sel2proj_flat_idx = sel2img_idx * KQ + sel2vol_idx * Q + sel2rot_idx
+                if fixed_volume_index is None:
+                    sel2proj_flat_idx = (
+                        sel2img_idx * projections_per_image
+                        + sel2vol_idx * Q
+                        + sel2rot_idx
+                    )
+                else:
+                    sel2proj_flat_idx = sel2img_idx * Q + sel2rot_idx
                 sel2trans_flat_idx = sel2img_idx * T + sel2trans_idx
                 sel_radial_residual_power = radial_residual_power(
                     proj_flat,
@@ -2410,6 +2494,7 @@ class HEALPixPoseSearcher(torch.nn.Module):
         *,
         particle_index: torch.LongTensor | None = None,
         ctf: torch.Tensor | None = None,
+        fixed_volume_index: torch.LongTensor | None = None,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
@@ -2487,6 +2572,19 @@ class HEALPixPoseSearcher(torch.nn.Module):
             proj_image = self._project_global(self.base_rot, ctf=ctf)
             if int(proj_image.shape[0]) == 1:
                 proj_image = proj_image.expand(B, KQ, -1)
+            (
+                proj_image,
+                hypo2img_idx,
+                hypo2vol_idx,
+                hypo2rot_idx,
+                hypo2trans_idx,
+            ) = self._prepare_global_hypotheses(
+                proj_image,
+                batch_size=B,
+                num_rotations=Q,
+                num_translations=T,
+                fixed_volume_index=fixed_volume_index,
+            )
 
             trans = trans_center.view(B, 1, 2) + self.base_trans.view(1, T, 2)
             trans_image = self._translate_global(image, trans)
@@ -2495,37 +2593,14 @@ class HEALPixPoseSearcher(torch.nn.Module):
                 proj_image,
                 trans_image,
             )
-            hypo2img_idx = (
-                torch.arange(B, device=device)
-                .view(B, 1, 1, 1)
-                .expand(-1, K, Q, T)
-                .reshape(-1)
-            )
-            hypo2vol_idx = (
-                torch.arange(K, device=device)
-                .view(1, K, 1, 1)
-                .expand(B, -1, Q, T)
-                .reshape(-1)
-            )
-            hypo2rot_idx = (
-                torch.arange(Q, device=device)
-                .view(1, 1, Q, 1)
-                .expand(B, K, -1, T)
-                .reshape(-1)
-            )
-            hypo2trans_idx = (
-                torch.arange(T, device=device)
-                .view(1, 1, 1, T)
-                .expand(B, K, Q, -1)
-                .reshape(-1)
-            )
-            hypo_prob = self._apply_volume_class_similarity(
-                hypo_prob=hypo_prob,
-                hypo2img_idx=hypo2img_idx,
-                hypo2vol_idx=hypo2vol_idx,
-                num_images=B,
-                num_volumes=K,
-            )
+            if fixed_volume_index is None:
+                hypo_prob = self._apply_volume_class_similarity(
+                    hypo_prob=hypo_prob,
+                    hypo2img_idx=hypo2img_idx,
+                    hypo2vol_idx=hypo2vol_idx,
+                    num_images=B,
+                    num_volumes=K,
+                )
 
             sel_prob, sel2img_idx, sel_payload = self._select_by_prob(
                 hypo_prob=hypo_prob,
@@ -2636,6 +2711,7 @@ class HEALPixPoseSearcher(torch.nn.Module):
         particle_index: torch.LongTensor | None = None,
         ctf: torch.Tensor | None = None,
         search_grad_mode: str | None = None,
+        fixed_volume_index: torch.LongTensor | None = None,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
@@ -2681,11 +2757,13 @@ class HEALPixPoseSearcher(torch.nn.Module):
                 image,
                 particle_index=particle_index,
                 ctf=ctf,
+                fixed_volume_index=fixed_volume_index,
             )
         return self._search_grad_selected(
             image,
             particle_index=particle_index,
             ctf=ctf,
+            fixed_volume_index=fixed_volume_index,
         )
 
     def search(
@@ -2696,6 +2774,7 @@ class HEALPixPoseSearcher(torch.nn.Module):
         ctf: torch.Tensor | None = None,
         mode: str = "auto",
         search_grad_mode: str | None = None,
+        fixed_volume_index: torch.LongTensor | None = None,
     ):
         """Dispatch to the gradient-enabled or no-grad HEALPix search route.
 
@@ -2722,6 +2801,7 @@ class HEALPixPoseSearcher(torch.nn.Module):
                 particle_index=particle_index,
                 ctf=ctf,
                 search_grad_mode=search_grad_mode,
+                fixed_volume_index=fixed_volume_index,
             )
         if mode == "auto":
             if torch.is_grad_enabled() and bool(getattr(self.volume, "requires_grad", False)):
@@ -2730,16 +2810,19 @@ class HEALPixPoseSearcher(torch.nn.Module):
                     particle_index=particle_index,
                     ctf=ctf,
                     search_grad_mode=search_grad_mode,
+                    fixed_volume_index=fixed_volume_index,
                 )
             return self.search_no_grad(
                 image,
                 particle_index=particle_index,
                 ctf=ctf,
+                fixed_volume_index=fixed_volume_index,
             )
         if mode == "no_grad":
             return self.search_no_grad(
                 image,
                 particle_index=particle_index,
                 ctf=ctf,
+                fixed_volume_index=fixed_volume_index,
             )
         raise ValueError(f"Unsupported search mode: {mode!r}")

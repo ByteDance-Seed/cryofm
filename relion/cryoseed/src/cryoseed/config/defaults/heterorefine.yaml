@@ -35,12 +35,12 @@ reproduce:
 
 modules:
   volume:
-    num_volumes: 1
+    num_volumes: 2
     backproject_chunk: 16384
     full_backprojection: false
 
   search:
-    init_healpix_order: 2
+    init_healpix_order: 3
     neighbor_steps: 2
     init_trans_grid_extent: 5
     trans_grid_samples: 5
@@ -80,29 +80,15 @@ modules:
       tail_floor: 1.0e-5
       init_lowpass_cutoff: null
 
-homorefine:
+heterorefine:
   engine:
-    num_epochs: 50
+    num_epochs: 25
     init_lowpass_angstrom: 30
-    external_reconstruct: false
+    first_epoch_ncc: true
     solvent_mask: none
     solvent_mask_soft_edge_pixels: 5.0
-    solvent_fsc_correction: false
 
   scheduler:
-    first_epoch_ncc: true
-    confidence_threshold: 0.1
-    convergence_patience: 3
-    fsc_resolution_improvement_threshold: 5.0e-3
-    fsc_resolution_rebound_threshold: 1.0e-2
-    trans_update_rms_threshold: 0.5
-    pose_translation_center_mode: auto
     increase_radius_step: 10
-    increase_radius_aggressive_factor: 0.25
-    increase_radius_aggressive_fsc_threshold: 0.2
-    base_healpix_order: 3
-    auto_local_healpix_order: 4
-    use_cache: false
-    cache_max_healpix_order: 4
-    ssd_cache_min_side_length: 150
-    trans_extent_scale: 3.0
+    dvp_threshold: 1.0
+    pose_translation_center_mode: auto

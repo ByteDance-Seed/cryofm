@@ -38,6 +38,7 @@ class PriorVariance(nn.Module):
             return None
         return cls(
             image_size=int(config.data.image_size),
+            num_volumes=int(config.modules.volume.num_volumes),
             init_volume=None,
             init_lowpass_cutoff=config.modules.statistics.prior.init_lowpass_cutoff,
             device=device,
@@ -50,6 +51,7 @@ class PriorVariance(nn.Module):
         self,
         image_size: int,
         *,
+        num_volumes: int = 1,
         init_volume: Tensor | None = None,
         init_lowpass_cutoff: int | None = None,
         device: torch.device | str | None = None,
@@ -61,6 +63,7 @@ class PriorVariance(nn.Module):
 
         Args:
             image_size: Side length ``D`` of the cubic Fourier grid.
+            num_volumes: Number of independently regularized volume classes.
             init_volume: Optional initial Fourier volume used to initialize
                 :attr:`variance`.
             init_lowpass_cutoff: Optional low-pass size ``L`` used for the
@@ -73,8 +76,11 @@ class PriorVariance(nn.Module):
         """
         super().__init__()
         self.image_size = int(image_size)
+        self.num_volumes = int(num_volumes)
         if self.image_size <= 0:
             raise ValueError(f"image_size must be > 0, got {self.image_size}")
+        if self.num_volumes <= 0:
+            raise ValueError(f"num_volumes must be > 0, got {self.num_volumes}")
 
         self.init_lowpass_cutoff = None if init_lowpass_cutoff is None else int(init_lowpass_cutoff)
         if self.init_lowpass_cutoff is not None:
@@ -106,7 +112,7 @@ class PriorVariance(nn.Module):
         self.register_buffer(
             "variance",
             torch.full(
-                (self.num_radial_bins,),
+                (self.num_volumes, self.num_radial_bins),
                 self.init_variance,
                 dtype=torch.float32,
                 device=dev,
@@ -127,22 +133,26 @@ class PriorVariance(nn.Module):
 
         Args:
             volume: Complex tensor with shape ``(D, D, D)`` or ``(K, D, D, D)`` where
-                ``D == image_size`` and (if present) ``K == 1``.
+                ``D == image_size`` and ``K == num_volumes``.
         """
         D = int(self.image_size)
 
-        if volume.ndim == 4:
-            K = int(volume.shape[0])
-            if K != 1:
-                raise ValueError(f"volume must have K==1 when given as (K,D,D,D), got K={K}")
-            volume = volume[0]
-        elif volume.ndim != 3:
+        if volume.ndim == 3:
+            if self.num_volumes != 1:
+                raise ValueError(
+                    "a volume without a class dimension requires num_volumes=1"
+                )
+            volume = volume.unsqueeze(0)
+        elif volume.ndim != 4:
             raise ValueError(
-                f"volume must be (D,D,D) or (K,D,D,D) with K==1, got {tuple(volume.shape)}"
+                f"volume must be (D,D,D) or (K,D,D,D), got {tuple(volume.shape)}"
             )
 
-        if tuple(volume.shape) != (D, D, D):
-            raise ValueError(f"volume must have shape (D,D,D)=({D},{D},{D}), got {tuple(volume.shape)}")
+        expected_shape = (self.num_volumes, D, D, D)
+        if tuple(volume.shape) != expected_shape:
+            raise ValueError(
+                f"volume must have shape (K,D,D,D)={expected_shape}, got {tuple(volume.shape)}"
+            )
         if volume.dtype not in (torch.complex64, torch.complex128):
             raise ValueError(f"volume must be complex, got {volume.dtype}")
 
@@ -170,8 +180,11 @@ class PriorVariance(nn.Module):
             power = torch.where(mask, tail, power)
 
         radial = radial_average(power, max_radius=D // 2, ndim=3, use_cache=True)
-        if radial.ndim > 1:
-            radial = radial.reshape(-1, radial.shape[-1]).mean(dim=0)
+        if tuple(radial.shape) != tuple(self.variance.shape):
+            raise RuntimeError(
+                f"radial prior shape {tuple(radial.shape)} does not match "
+                f"stored variance shape {tuple(self.variance.shape)}"
+            )
         self.variance.copy_(radial.to(dtype=self.variance.dtype))
 
     @property
@@ -208,7 +221,7 @@ class PriorVariance(nn.Module):
             padding_mode: Passed to :func:`cryoseed.ops.radial.radial_broadcast`.
 
         Returns:
-            Real tensor of shape ``(side_length,) * ndim``.
+            Real tensor of shape ``(K,) + (side_length,) * ndim``.
         """
         if side_length is None:
             side_length = self.image_size
@@ -220,7 +233,7 @@ class PriorVariance(nn.Module):
                 f"max_radius must be in [0, {self.num_radial_bins - 1}], got {max_radius}"
             )
         return radial_broadcast(
-            self.variance[: max_radius + 1],
+            self.variance[:, : max_radius + 1],
             ndim,
             out_len=side_length,
             padding_mode=padding_mode,
@@ -244,7 +257,7 @@ class PriorVariance(nn.Module):
                 f"max_radius must be in [0, {self.num_radial_bins - 1}], got {max_radius}"
             )
         return radial_broadcast(
-            self.precision[: max_radius + 1],
+            self.precision[:, : max_radius + 1],
             ndim,
             out_len=side_length,
             padding_mode=padding_mode,
@@ -267,22 +280,28 @@ class PriorVariance(nn.Module):
         """
         fsc = torch.as_tensor(fsc_values, device=self.device, dtype=torch.float32)
         w = torch.as_tensor(weight, device=self.device, dtype=torch.float32)
+        if self.num_volumes != 1:
+            raise ValueError("FSC-based prior updates require num_volumes=1")
+        if fsc.ndim == 1:
+            fsc = fsc.unsqueeze(0)
+        if w.ndim == 1:
+            w = w.unsqueeze(0)
 
         if torch.any(w < -1e-9):
             raise ValueError("weight must be nonnegative")
         w = w.clamp_min(0.0)
 
-        if fsc.ndim != 1 or w.ndim != 1:
-            raise ValueError("fsc_values and weight must be 1D tensors")
+        if fsc.ndim != 2 or w.ndim != 2:
+            raise ValueError("fsc_values and weight must be 1D or (1,R) tensors")
 
         R = int(self.variance.numel())
-        if int(fsc.numel()) == R - 1:
+        if int(fsc.shape[-1]) == R - 1:
             dc_fsc = 0.999
-            fsc = torch.cat((fsc.new_tensor([dc_fsc]), fsc), dim=0)
+            fsc = torch.cat((fsc.new_full((1, 1), dc_fsc), fsc), dim=-1)
 
-        if int(fsc.numel()) != R:
+        if tuple(fsc.shape) != (1, R):
             raise ValueError(f"fsc_values must have length {R} (or {R-1}), got {int(fsc.numel())}")
-        if int(w.numel()) != R:
+        if tuple(w.shape) != (1, R):
             raise ValueError(f"weight must have length {R}, got {int(w.numel())}")
 
         fsc = fsc.clamp(min=0.001, max=0.999)

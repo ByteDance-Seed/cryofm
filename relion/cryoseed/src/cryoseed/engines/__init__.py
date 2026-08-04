@@ -5,20 +5,23 @@ from typing import Any
 
 __all__ = [
     "AbInitioEngine",
+    "HeteroRefineEngine",
     "HomoRefineEngine",
     "abinitio",
     "external",
+    "heterorefine",
     "homorefine",
 ]
 
 _EXPORTS: dict[str, tuple[str, str]] = {
     "AbInitioEngine": ("abinitio", "AbInitioEngine"),
+    "HeteroRefineEngine": ("heterorefine", "HeteroRefineEngine"),
     "HomoRefineEngine": ("homorefine", "HomoRefineEngine"),
 }
 
 
 def __getattr__(name: str) -> Any:
-    if name in {"abinitio", "external", "homorefine"}:
+    if name in {"abinitio", "external", "heterorefine", "homorefine"}:
         target_module = "homorefine" if name == "external" else name
         module = importlib.import_module(f"{__name__}.{target_module}")
         globals()[name] = module

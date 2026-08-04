@@ -3,7 +3,7 @@ io:
   data_path: ""
   ref_volume_path: ""
   output_path: outputs
-  ssd_cache_root: ""
+  ssd_cache_root: outputs/ssd_cache
 
 data:
   batch_size: 4
@@ -25,7 +25,7 @@ data:
     defocus_angle_deg: null
 
 logging:
-  log_dir: ""
+  log_dir: outputs/logs
   log_prefix: cryoseed
   level: INFO
 
@@ -38,6 +38,7 @@ modules:
     num_volumes: 1
     backproject_chunk: 16384
     full_backprojection: false
+
   search:
     init_healpix_order: 2
     neighbor_steps: 2
@@ -58,23 +59,25 @@ modules:
       zero_mask: true
       soft_edge_pixels: 5.0
       protection_disable_epochs: 5
-      protection_radius_factor: 2.628260884878466
+      protection_radius_factor: 2.6282608848784657
+
   statistics:
     noise:
       enabled: true
       accumulate_chunk: 16384
       init_variance: 1.0
-      precision_eps: 1.0e-6
+      precision_eps: 1e-06
       ema_decay: 0.0
       prior_weight: 0.0
       inflated_weight: 0.0
       inflated_decay: null
       inflated_scale: 8.0
+
     prior:
       enabled: true
       init_variance: 1.0
-      precision_eps: 1.0e-6
-      tail_floor: 1.0e-5
+      precision_eps: 1e-06
+      tail_floor: 1e-05
       init_lowpass_cutoff: null
 
 abinitio:
@@ -86,10 +89,12 @@ abinitio:
     solvent_mask_soft_edge_pixels: 5.0
     loss_ema_decay: 0.9
     pose_rms_ema_decay: 0.9
+
   solver:
     learning_rate: 1.0
     learning_rate_decay: 0.9995
     momentum: 0.9
+
   scheduler:
     schedule_check_interval_iters: 100
     confidence_threshold: 0.5
@@ -104,6 +109,19 @@ abinitio:
     pose_rotation_stability_factor: 1.0
     pose_translation_stability_factor: 0.5
 
+heterorefine:
+  engine:
+    num_epochs: 25
+    init_lowpass_angstrom: 30
+    first_epoch_ncc: true
+    solvent_mask: none
+    solvent_mask_soft_edge_pixels: 5.0
+
+  scheduler:
+    increase_radius_step: 10
+    dvp_threshold: 1.0
+    pose_translation_center_mode: auto
+
 homorefine:
   engine:
     num_epochs: 50
@@ -112,12 +130,13 @@ homorefine:
     solvent_mask: none
     solvent_mask_soft_edge_pixels: 5.0
     solvent_fsc_correction: false
+
   scheduler:
     first_epoch_ncc: true
     confidence_threshold: 0.1
     convergence_patience: 3
-    fsc_resolution_improvement_threshold: 5.0e-3
-    fsc_resolution_rebound_threshold: 1.0e-2
+    fsc_resolution_improvement_threshold: 0.005
+    fsc_resolution_rebound_threshold: 0.01
     trans_update_rms_threshold: 0.5
     pose_translation_center_mode: auto
     increase_radius_step: 10
