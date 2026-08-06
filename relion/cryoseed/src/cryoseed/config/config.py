@@ -732,11 +732,10 @@ class MainConfig:
         )
 
         output_path_changed = (
-            hasattr(args, "output_path")
-            and getattr(args, "output_path", None) is not None
+            getattr(args, "io__output_path", None) is not None
             and cfg.io.output_path != initial_output_path
         )
-        if getattr(args, "log_dir", None) is None and (
+        if getattr(args, "logging__log_dir", None) is None and (
             (not cfg.logging.log_dir)
             or (
                 output_path_changed
@@ -744,7 +743,7 @@ class MainConfig:
             )
         ):
             cfg.logging.log_dir = str(Path(cfg.io.output_path) / "logs")
-        if getattr(args, "ssd_cache_root", None) is None and (
+        if getattr(args, "io__ssd_cache_root", None) is None and (
             (not cfg.io.ssd_cache_root)
             or (
                 output_path_changed
