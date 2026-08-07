@@ -32,17 +32,17 @@ cryoSeed is intended to expose core reconstruction functionality in a form that 
 conda create -n cryoseed python=3.10 -y
 conda activate cryoseed
 python -m pip install --upgrade pip
+```
 
-# Install PyTorch first according to your CUDA / platform environment.
-python -m pip install torch
+We recommend installing PyTorch manually first so that you can select the
+appropriate build for your CUDA, ROCm, or CPU environment. See the
+[official PyTorch installation guide](https://pytorch.org/get-started/locally/)
+for the command matching your platform.
 
-# Install runtime dependencies used by cryoSeed.
-python -m pip install numpy scipy pandas matplotlib mrcfile starfile pyyaml tqdm
+Then install cryoSeed from the repository. The remaining runtime dependencies
+declared in `pyproject.toml` will be installed automatically.
 
-# Optional: install Triton for accelerated backend kernels.
-python -m pip install triton
-
-# Install cryoSeed in editable mode.
+```bash
 python -m pip install -e .
 ```
 
