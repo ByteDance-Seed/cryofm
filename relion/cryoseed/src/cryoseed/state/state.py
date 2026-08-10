@@ -401,7 +401,7 @@ class OptimState:
         st.schedule.particle_mask_extra_diameter_angstrom = 0.0
         st.schedule.proj_cache_backend = "memory" if use_cache else "none"
         st.schedule.full_backprojection = bool(
-            config.modules.volume.full_backprojection
+            config.modules.volume.voxel.full_backprojection
         )
         st.schedule.pose_search_criterion = parse_pose_search_criterion("posterior")
         return st

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from typing import Any, TypeVar
 
-import torch
 from torch import Tensor, nn
 
 from cryoseed.config import MainConfig
@@ -25,17 +25,22 @@ class Volume(nn.Module, ABC):
     def project(self, *args: Any, **kwargs: Any) -> Tensor:
         raise NotImplementedError
 
-    @abstractmethod
-    def backproject(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError
+    def backward(self, loss: Tensor) -> None:
+        """Backpropagate a loss through the current computation graph."""
+        loss.backward()
 
     @abstractmethod
     def update(self, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError
 
-    @abstractmethod
-    def zero_accum(self, *, set_to_none: bool = False) -> None:
-        raise NotImplementedError
+    def update_lr(self) -> None:
+        """Advance the representation-owned learning-rate policy."""
+
+    def reset_lr(
+        self,
+        learning_rate: float | Sequence[float] | None = None,
+    ) -> None:
+        """Reset the representation-owned learning-rate policy."""
 
     @abstractmethod
     def forward(self, *args: Any, **kwargs: Any) -> Tensor:

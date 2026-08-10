@@ -36,8 +36,9 @@ reproduce:
 modules:
   volume:
     num_volumes: 2
-    backproject_chunk: 16384
-    full_backprojection: false
+    voxel:
+      backproject_chunk: 16384
+      full_backprojection: false
 
   search:
     init_healpix_order: 3

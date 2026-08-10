@@ -171,7 +171,8 @@ class EMSolver(Solver):
         self.pose.update()
         self.pose_searcher.clear_memory_cache()
 
-    def zero_accum(self):
+    def zero(self) -> None:
+        """Clear accumulated statistics for the next update."""
         self.volume.zero_accum()
         if self.noise is not None:
             self.noise.zero_accum()

@@ -23,5 +23,6 @@ class Solver:
     def update(self):
         raise NotImplementedError
 
-    def zero_accum(self):
+    def zero(self) -> None:
+        """Clear transient state consumed by the next update."""
         raise NotImplementedError

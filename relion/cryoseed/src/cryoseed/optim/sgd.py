@@ -168,9 +168,6 @@ class SGDSolver(Solver):
         state: OptimState,
         pose_searcher: PoseSearcher,
         prior=None,
-        learning_rate: float = 1.0,
-        learning_rate_decay: float = 1.0,
-        momentum: float = 0.9,
     ):
         self.state: OptimState = state
         self.volume: Volume = pose_searcher.volume
@@ -185,56 +182,32 @@ class SGDSolver(Solver):
                 f"got {type(self.volume).__name__}"
             )
         self.curvature = _Curvature(self.volume)
-        self.learning_rate = float(learning_rate)
-        self.learning_rate_decay = float(learning_rate_decay)
-        self.momentum = float(momentum)
 
         if not any(param.requires_grad for param in self.volume.parameters()):
             raise ValueError(
                 "SGDSolver requires a differentiable volume with at least one "
                 "parameter where requires_grad=True"
             )
-        if self.learning_rate <= 0:
-            raise ValueError(
-                f"learning_rate must be > 0, got {self.learning_rate}"
-            )
-        if not (0.0 < self.learning_rate_decay <= 1.0):
-            raise ValueError(
-                "learning_rate_decay must be in (0, 1], got "
-                f"{self.learning_rate_decay}"
-            )
-        if not (0.0 <= self.momentum < 1.0):
-            raise ValueError(f"momentum must be in [0, 1), got {self.momentum}")
         if self.noise is not None and not bool(getattr(self.noise, "requires_accum", False)):
             raise ValueError(
                 "SGDSolver requires noise.requires_accum=True when noise estimation is enabled"
             )
 
-        self.optimizer = torch.optim.SGD(
-            self.volume.parameters(),
-            lr=self.learning_rate,
-            momentum=self.momentum,
-            dampening=self.momentum,
-        )
-        self.lr_scheduler = self._build_lr_scheduler()
+        if self.volume.optimizer is None:
+            raise ValueError("SGDSolver requires a configured volume optimizer")
+
+    @property
+    def optimizer(self) -> torch.optim.Optimizer:
+        """Return the optimizer owned by the volume."""
+        optimizer = self.volume.optimizer
+        if optimizer is None:
+            raise RuntimeError("SGDSolver requires a configured volume optimizer")
+        return optimizer
 
     def refresh(self):
         self.pose_searcher.refresh()
         self._validate_schedule_constraints()
-        self._reset_learning_rate()
-
-    def _build_lr_scheduler(self):
-        if self.learning_rate_decay == 1.0:
-            return None
-        return torch.optim.lr_scheduler.ExponentialLR(
-            self.optimizer,
-            gamma=self.learning_rate_decay,
-        )
-
-    def _reset_learning_rate(self) -> None:
-        for param_group in self.optimizer.param_groups:
-            param_group["lr"] = self.learning_rate
-        self.lr_scheduler = self._build_lr_scheduler()
+        self.volume.reset_lr()
 
     def _validate_schedule_constraints(self) -> None:
         schedule = self.state.schedule
@@ -283,7 +256,7 @@ class SGDSolver(Solver):
         )
 
     def accumulate(self, result: SGDInferResult) -> None:
-        result.loss.backward()
+        self.volume.backward(result.loss)
 
         if self.noise is not None:
             if result.radial_residual_power is None:
@@ -326,21 +299,19 @@ class SGDSolver(Solver):
             step_size = 1.0 / self.curvature.amax(dim=(1, 2, 3)).clamp_min(1e-6)
             grad.mul_(step_size[:, None, None, None])
 
-        self.optimizer.step()
-        if (
-            self.lr_scheduler is not None
-            and bool(self.state.abinitio.solver.activate_learning_rate_decay)
-        ):
-            self.lr_scheduler.step()
+        self.volume.update()
+        if bool(self.state.abinitio.solver.activate_learning_rate_decay):
+            self.volume.update_lr()
 
         if self.noise is not None:
             self.noise.update()
 
         self.pose.update()
 
-    def zero_accum(self):
+    def zero(self) -> None:
+        """Clear gradients and accumulated statistics for the next update."""
         self.curvature.zero_accum()
-        self.optimizer.zero_grad()
+        self.volume.zero_grad(set_to_none=True)
         self.pose.zero_accum()
         if self.noise is not None:
             self.noise.zero_accum()

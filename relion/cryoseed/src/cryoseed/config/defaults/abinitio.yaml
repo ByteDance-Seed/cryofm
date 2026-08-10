@@ -36,8 +36,12 @@ reproduce:
 modules:
   volume:
     num_volumes: 1
-    backproject_chunk: 16384
-    full_backprojection: false
+    voxel:
+      backproject_chunk: 16384
+      full_backprojection: false
+      learning_rate: 1.0
+      learning_rate_decay: 0.9995
+      momentum: 0.9
 
   search:
     init_healpix_order: 0
@@ -89,11 +93,6 @@ abinitio:
     solvent_mask_soft_edge_pixels: 5.0
     loss_ema_decay: 0.9
     pose_rms_ema_decay: 0.9
-
-  solver:
-    learning_rate: 1.0
-    learning_rate_decay: 0.9995
-    momentum: 0.9
 
   scheduler:
     schedule_check_interval_iters: 100

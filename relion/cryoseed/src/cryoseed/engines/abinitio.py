@@ -161,9 +161,6 @@ class AbInitioEngine(torch.nn.Module):
         self.solver = SGDSolver(
             state=self.state,
             pose_searcher=self.pose_searcher,
-            learning_rate=float(config.abinitio.solver.learning_rate),
-            learning_rate_decay=float(config.abinitio.solver.learning_rate_decay),
-            momentum=float(config.abinitio.solver.momentum),
         )
         self.scheduler = AbInitioScheduler(self.state, device=self.device).from_config(config)
         self.current_loss: float | None = None
@@ -240,7 +237,7 @@ class AbInitioEngine(torch.nn.Module):
             bool(self.state.abinitio.engine.is_final_epoch) or is_last_configured_epoch
         )
         self.state.schedule.full_backprojection = (
-            bool(self.config.modules.volume.full_backprojection)
+            bool(self.config.modules.volume.voxel.full_backprojection)
         )
         self.state.abinitio.engine.skip_external_reconstruct = bool(
             self.state.abinitio.engine.is_final_epoch
@@ -1346,7 +1343,7 @@ class AbInitioEngine(torch.nn.Module):
                 self.current_loss = None
                 stopped_mid_epoch_on_convergence = False
                 for batch in dl:
-                    self.solver.zero_accum()
+                    self.solver.zero()
                     batch = batch.to(self.device, non_blocking=True)
                     result = self.solver.infer(batch)
                     self.current_loss = float(result.loss.detach().item())

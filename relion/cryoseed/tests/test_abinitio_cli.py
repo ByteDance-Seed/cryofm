@@ -19,7 +19,13 @@ def _assert_command_yaml_shape(raw: dict, *, command: str) -> None:
     assert command in raw
     assert other_command not in raw
     assert "modules" in raw
+    assert "num_volumes" in raw["modules"]["volume"]
+    voxel = raw["modules"]["volume"]["voxel"]
     if command == "abinitio":
+        assert "solver" not in raw["abinitio"]
+        assert voxel["learning_rate"] == 1.0
+        assert voxel["learning_rate_decay"] == 0.9995
+        assert voxel["momentum"] == 0.9
         assert "use_cache" not in raw["abinitio"]["scheduler"]
         assert "increase_radius_aggressive_factor" not in raw["abinitio"]["scheduler"]
         assert "external_reconstruct" not in raw["abinitio"]["engine"]
@@ -38,6 +44,8 @@ def test_abinitio_cli_loads_command_defaults():
     assert cfg.abinitio.scheduler.target_side_length_resolution == 10.0
     assert cfg.abinitio.engine.solvent_mask == "none"
     assert cfg.modules.search.init_trans_grid_extent is None
+    assert cfg.modules.volume.num_volumes == 1
+    assert cfg.modules.volume.voxel.learning_rate == 1.0
 
 
 def test_abinitio_cli_help_only_exposes_leaf_config_flags():
@@ -85,6 +93,10 @@ def test_command_defaults_yaml_only_lists_supported_fields():
 
     _assert_command_yaml_shape(homorefine_raw, command="homorefine")
     _assert_command_yaml_shape(abinitio_raw, command="abinitio")
+    homorefine_voxel = homorefine_raw["modules"]["volume"]["voxel"]
+    assert "learning_rate" not in homorefine_voxel
+    assert "learning_rate_decay" not in homorefine_voxel
+    assert "momentum" not in homorefine_voxel
 
 
 @pytest.mark.parametrize(

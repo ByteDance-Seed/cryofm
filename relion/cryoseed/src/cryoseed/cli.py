@@ -58,12 +58,21 @@ _FIELD_HELP_BY_PATH: dict[tuple[str, ...], str] = {
     ("modules", "volume", "num_volumes"): (
         "Number of volumes/classes K (homorefine requires K=1)."
     ),
-    ("modules", "volume", "backproject_chunk"): (
+    ("modules", "volume", "voxel", "backproject_chunk"): (
         "Chunk size over poses in backprojection (memory/speed tradeoff)."
     ),
-    ("modules", "volume", "full_backprojection"): (
+    ("modules", "volume", "voxel", "full_backprojection"): (
         "Use the full Fourier image radius during backprojection instead of the "
         "current side_length-limited radius."
+    ),
+    ("modules", "volume", "voxel", "learning_rate"): (
+        "Global SGD learning rate for ab initio volume updates."
+    ),
+    ("modules", "volume", "voxel", "learning_rate_decay"): (
+        "Exponential learning-rate decay factor applied after each solver update."
+    ),
+    ("modules", "volume", "voxel", "momentum"): (
+        "SGD momentum used for ab initio volume updates."
     ),
     ("modules", "search", "init_healpix_order"): "Initial HEALPix order.",
     ("modules", "search", "neighbor_steps"): (
@@ -185,15 +194,6 @@ _FIELD_HELP_BY_PATH: dict[tuple[str, ...], str] = {
     ),
     ("abinitio", "engine", "pose_rms_ema_decay"): (
         "EMA decay used for the ab initio pose-update RMS metrics."
-    ),
-    ("abinitio", "solver", "learning_rate"): (
-        "Global SGD learning rate for ab initio volume updates."
-    ),
-    ("abinitio", "solver", "learning_rate_decay"): (
-        "Exponential learning-rate decay factor applied after each solver update."
-    ),
-    ("abinitio", "solver", "momentum"): (
-        "SGD momentum used for ab initio volume updates."
     ),
     ("abinitio", "scheduler", "schedule_check_interval_iters"): (
         "Requested iterations between ab initio scheduler checkpoints."
@@ -471,6 +471,13 @@ def _add_nested_config_overrides(
     for root_name, cls in shared_sections:
         specs.extend(_leaf_field_specs(root_name, cls))
     specs.extend(_leaf_field_specs(*command_sections[command]))
+    if command != "abinitio":
+        gradient_paths = {
+            ("modules", "volume", "voxel", "learning_rate"),
+            ("modules", "volume", "voxel", "learning_rate_decay"),
+            ("modules", "volume", "voxel", "momentum"),
+        }
+        specs = [spec for spec in specs if spec["path"] not in gradient_paths]
 
     leaf_counts: dict[str, int] = {}
     for spec in specs:

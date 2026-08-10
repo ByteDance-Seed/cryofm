@@ -64,7 +64,8 @@ class HomoRefineEngine(torch.nn.Module):
         if int(self.config.modules.volume.num_volumes) != 1:
             raise ValueError(
                 "Refinement requires a single volume (num_volumes must be 1); "
-                f"got num_volumes={int(self.config.modules.volume.num_volumes)}"
+                "got num_volumes="
+                f"{int(self.config.modules.volume.num_volumes)}"
             )
 
         # device
@@ -274,7 +275,8 @@ class HomoRefineEngine(torch.nn.Module):
             bool(self.state.homorefine.engine.is_final_epoch) or is_last_configured_epoch
         )
         self.state.schedule.full_backprojection = (
-            bool(self.config.modules.volume.full_backprojection)
+            bool(self.config.modules.volume.voxel.full_backprojection)
+            or bool(self.state.homorefine.engine.is_final_epoch)
             or bool(self.state.homorefine.engine.is_final_epoch)
         )
         self.state.homorefine.engine.skip_external_reconstruct = bool(
@@ -1084,8 +1086,8 @@ class HomoRefineEngine(torch.nn.Module):
 
                 logger.info("Epoch %d started", epoch)
 
-                self.solver_half0.zero_accum()
-                self.solver_half1.zero_accum()
+                self.solver_half0.zero()
+                self.solver_half1.zero()
                 self._average_half_low_frequencies()
 
                 # half 0

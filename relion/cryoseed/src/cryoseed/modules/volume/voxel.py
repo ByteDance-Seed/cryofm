@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
 import torch
@@ -46,7 +47,18 @@ class VoxelGrid(Volume):
         *,
         requires_accum: bool = True,
         requires_grad: bool = False,
+        optimizer_factory: (
+            Callable[[Iterable[nn.Parameter]], torch.optim.Optimizer] | None
+        ) = None,
+        lr_scheduler_factory: (
+            Callable[
+                [torch.optim.Optimizer],
+                torch.optim.lr_scheduler.LRScheduler | None,
+            ]
+            | None
+        ) = None,
     ) -> VoxelGrid:
+        voxel_config = config.modules.volume.voxel
         return cls(
             grid_size=int(config.data.image_size),
             num_volumes=int(config.modules.volume.num_volumes),
@@ -54,7 +66,12 @@ class VoxelGrid(Volume):
             device_mesh=device_mesh,
             requires_accum=requires_accum,
             requires_grad=requires_grad,
-            backproject_chunk=int(config.modules.volume.backproject_chunk),
+            backproject_chunk=int(voxel_config.backproject_chunk),
+            learning_rate=float(voxel_config.learning_rate),
+            learning_rate_decay=float(voxel_config.learning_rate_decay),
+            momentum=float(voxel_config.momentum),
+            optimizer_factory=optimizer_factory,
+            lr_scheduler_factory=lr_scheduler_factory,
         )
 
     def __init__(
@@ -67,6 +84,19 @@ class VoxelGrid(Volume):
         requires_accum: bool = True,
         requires_grad: bool = False,
         backproject_chunk: int = 65536,
+        learning_rate: float = 1.0,
+        learning_rate_decay: float = 0.9995,
+        momentum: float = 0.9,
+        optimizer_factory: (
+            Callable[[Iterable[nn.Parameter]], torch.optim.Optimizer] | None
+        ) = None,
+        lr_scheduler_factory: (
+            Callable[
+                [torch.optim.Optimizer],
+                torch.optim.lr_scheduler.LRScheduler | None,
+            ]
+            | None
+        ) = None,
     ):
         """Create a :class:`VoxelGrid`.
 
@@ -82,6 +112,13 @@ class VoxelGrid(Volume):
             requires_grad: Whether ``self.volume`` requires gradients.
             backproject_chunk: Chunk size over the pose dimension used to reduce
                 peak memory during backprojection.
+            learning_rate: Learning rate for the default SGD optimizer.
+            learning_rate_decay: Exponential learning-rate decay factor.
+            momentum: Momentum and dampening for the default SGD optimizer.
+            optimizer_factory: Optional factory that replaces the default SGD
+                optimizer when gradients are enabled.
+            lr_scheduler_factory: Optional factory that replaces the default
+                exponential learning-rate scheduler.
         """
         super().__init__()
         self.grid_size = grid_size
@@ -101,6 +138,24 @@ class VoxelGrid(Volume):
             ),
             requires_grad=requires_grad,
         )
+        self.optimizer: torch.optim.Optimizer | None = None
+        self.lr_scheduler: torch.optim.lr_scheduler.LRScheduler | None = None
+        self._learning_rate_decay = float(learning_rate_decay)
+        if not (0.0 < self._learning_rate_decay <= 1.0):
+            raise ValueError(
+                "learning_rate_decay must be in (0, 1], got "
+                f"{self._learning_rate_decay}"
+            )
+        self._lr_scheduler_factory = lr_scheduler_factory
+        self._initial_lrs: list[float] = []
+        if self.requires_grad:
+            if optimizer_factory is None:
+                self.configure_sgd(
+                    learning_rate=learning_rate,
+                    momentum=momentum,
+                )
+            else:
+                self.set_optimizer(optimizer_factory(self.parameters()))
 
         if requires_accum:
             accum_numer = torch.zeros_like(self.volume, dtype=torch.complex64)
@@ -129,10 +184,125 @@ class VoxelGrid(Volume):
         return self._device_anchor.device
 
     def requires_grad_(self, requires_grad: bool = True) -> VoxelGrid:
-        """Set autograd participation for the volume Parameter."""
+        """Set autograd participation without changing the optimizer."""
         self.requires_grad = bool(requires_grad)
         self.volume.requires_grad_(self.requires_grad)
         return self
+
+    def set_optimizer(
+        self,
+        optimizer: torch.optim.Optimizer | None,
+    ) -> VoxelGrid:
+        """Set the optimizer used by :meth:`update`.
+
+        A non-``None`` optimizer must manage exactly this module's parameters.
+        Replacing an optimizer intentionally discards the previous optimizer's
+        state.
+        """
+        if optimizer is not None:
+            expected_param_ids = {id(param) for param in self.parameters()}
+            optimizer_param_ids = {
+                id(param)
+                for group in optimizer.param_groups
+                for param in group["params"]
+            }
+            if optimizer_param_ids != expected_param_ids:
+                raise ValueError(
+                    "optimizer must manage exactly the parameters of this VoxelGrid"
+                )
+        self.optimizer = optimizer
+        self._initial_lrs = (
+            []
+            if optimizer is None
+            else [float(group["lr"]) for group in optimizer.param_groups]
+        )
+        self.lr_scheduler = self._build_lr_scheduler()
+        return self
+
+    def _build_lr_scheduler(
+        self,
+    ) -> torch.optim.lr_scheduler.LRScheduler | None:
+        if self.optimizer is None:
+            return None
+        if self._lr_scheduler_factory is not None:
+            return self._lr_scheduler_factory(self.optimizer)
+        if self._learning_rate_decay == 1.0:
+            return None
+        return torch.optim.lr_scheduler.ExponentialLR(
+            self.optimizer,
+            gamma=self._learning_rate_decay,
+        )
+
+    def configure_sgd(
+        self,
+        *,
+        learning_rate: float = 1.0,
+        momentum: float = 0.9,
+    ) -> VoxelGrid:
+        """Install the default SGD optimizer used for gradient updates."""
+        learning_rate = float(learning_rate)
+        momentum = float(momentum)
+        if learning_rate <= 0:
+            raise ValueError(f"learning_rate must be > 0, got {learning_rate}")
+        if not (0.0 <= momentum < 1.0):
+            raise ValueError(f"momentum must be in [0, 1), got {momentum}")
+        self.set_optimizer(
+            torch.optim.SGD(
+                self.parameters(),
+                lr=learning_rate,
+                momentum=momentum,
+                dampening=momentum,
+            )
+        )
+        return self
+
+    def update_lr(self) -> None:
+        """Advance the configured learning-rate scheduler once."""
+        if self.lr_scheduler is not None:
+            self.lr_scheduler.step()
+
+    def reset_lr(
+        self,
+        learning_rate: float | Sequence[float] | None = None,
+    ) -> None:
+        """Set learning rates and rebuild the scheduler.
+
+        ``None`` restores the rates captured when the optimizer was installed.
+        A scalar applies to every parameter group, while a sequence sets each
+        group independently. Explicit rates do not replace the captured rates.
+        """
+        if self.optimizer is None:
+            return
+        if len(self.optimizer.param_groups) != len(self._initial_lrs):
+            raise RuntimeError(
+                "optimizer parameter groups changed after scheduler configuration"
+            )
+        if learning_rate is None:
+            learning_rates = self._initial_lrs
+        elif isinstance(learning_rate, (int, float)):
+            learning_rates = [float(learning_rate)] * len(self.optimizer.param_groups)
+        else:
+            learning_rates = [float(value) for value in learning_rate]
+            if len(learning_rates) != len(self.optimizer.param_groups):
+                raise ValueError(
+                    "learning_rate sequence length must match optimizer parameter "
+                    f"groups ({len(self.optimizer.param_groups)}), got "
+                    f"{len(learning_rates)}"
+                )
+        if any(value <= 0 for value in learning_rates):
+            raise ValueError("learning rates must be > 0")
+        for group, value in zip(
+            self.optimizer.param_groups, learning_rates, strict=True
+        ):
+            group["lr"] = value
+            group["initial_lr"] = value
+        self.lr_scheduler = self._build_lr_scheduler()
+
+    @torch.no_grad()
+    def mark_updated_(self) -> None:
+        """Invalidate derived volume state after an in-place parameter update."""
+        self.downsampled_volumes.clear()
+        self.volume_version += 1
 
     @property
     def volume_real(self) -> Tensor:
@@ -241,12 +411,9 @@ class VoxelGrid(Volume):
                 f"{tuple(self.volume.shape)}"
             )
 
-        volume = volume.detach()
-        if volume.device != self.device:
-            volume = volume.to(self.device)
-        volume = volume.clone()
-
-        self.volume = nn.Parameter(volume, requires_grad=self.requires_grad)
+        self.volume.copy_(
+            volume.detach().to(device=self.volume.device, dtype=self.volume.dtype)
+        )
 
         if self.requires_accum:
             self.accum_numer = torch.zeros_like(self.volume, dtype=torch.complex64)
@@ -255,8 +422,7 @@ class VoxelGrid(Volume):
             self.accum_numer = None
             self.accum_denom = None
 
-        self.downsampled_volumes.clear()
-        self.volume_version += 1
+        self.mark_updated_()
 
     @torch.no_grad()
     def copy_volume_(self, volume: Tensor) -> None:
@@ -275,8 +441,7 @@ class VoxelGrid(Volume):
         self.volume.copy_(
             volume.detach().to(device=self.volume.device, dtype=self.volume.dtype)
         )
-        self.downsampled_volumes.clear()
-        self.volume_version += 1
+        self.mark_updated_()
 
     def _build_downsampled_volume(self, side_length: int) -> Tensor:
         downsampled_volume = downsample3d(self.volume, side_length)
@@ -535,10 +700,12 @@ class VoxelGrid(Volume):
 
     @torch.no_grad()
     def update(self, prior_precision_spectrum: Tensor | None = None) -> None:
-        """Update ``self.volume`` from accumulated backprojections.
+        """Apply enabled EM and gradient update paths to ``self.volume``.
 
-        This computes ``volume = accum_numer / (accum_denom + prior)`` (where valid),
-        clears cached downsampled volumes, and increments ``volume_version``.
+        When accumulation buffers are enabled, the EM path first computes
+        ``volume = accum_numer / (accum_denom + prior)`` where valid. When an
+        optimizer is configured, ``optimizer.step()`` runs afterwards. Derived
+        volume state is invalidated once after the enabled updates.
 
         Args:
             prior_precision_spectrum: Optional real-valued prior precision spectrum
@@ -553,49 +720,68 @@ class VoxelGrid(Volume):
             are left unchanged.
 
         """
-        if (not self.requires_accum) or self.accum_numer is None or self.accum_denom is None:
-            return
+        updated = False
+        if (
+            self.requires_accum
+            and self.accum_numer is not None
+            and self.accum_denom is not None
+        ):
+            numer = self.accum_numer
+            denom = self.accum_denom
 
-        numer = self.accum_numer
-        denom = self.accum_denom
+            dist = getattr(torch, "distributed", None)
+            if dist is not None and dist.is_available() and dist.is_initialized():
+                if self.device_mesh is not None:
+                    group = (
+                        self.device_mesh.get_group(0)
+                        if hasattr(self.device_mesh, "get_group")
+                        else self.device_mesh
+                    )
+                else:
+                    group = dist.group.WORLD
 
-        dist = getattr(torch, "distributed", None)
-        if dist is not None and dist.is_available() and dist.is_initialized():
-            if self.device_mesh is not None:
-                group = self.device_mesh.get_group(0) if hasattr(self.device_mesh, "get_group") else self.device_mesh
-            else:
-                group = dist.group.WORLD
+                data_parallel_size = dist.get_world_size(group=group)
+                if data_parallel_size > 1:
+                    numer = numer.clone()
+                    denom = denom.clone()
+                    dist.all_reduce(numer, op=dist.ReduceOp.SUM, group=group)
+                    dist.all_reduce(denom, op=dist.ReduceOp.SUM, group=group)
 
-            data_parallel_size = dist.get_world_size(group=group)
-            if data_parallel_size > 1:
-                numer = numer.clone()
-                denom = denom.clone()
-                dist.all_reduce(numer, op=dist.ReduceOp.SUM, group=group)
-                dist.all_reduce(denom, op=dist.ReduceOp.SUM, group=group)
-
-        denom_eff = denom
-        if prior_precision_spectrum is not None:
-            prior = prior_precision_spectrum.to(device=denom.device, dtype=denom.dtype)
-            if prior.ndim == 3:
-                prior = prior.unsqueeze(0)
-
-            if prior.shape == denom.shape:
-                pass
-            elif prior.ndim == 4 and prior.shape[0] == 1 and tuple(prior.shape[1:]) == tuple(denom.shape[1:]):
-                prior = prior.expand_as(denom)
-            else:
-                raise ValueError(
-                    "prior_precision_spectrum must be broadcastable to "
-                    f"{tuple(denom.shape)}, got {tuple(prior.shape)}"
+            denom_eff = denom
+            if prior_precision_spectrum is not None:
+                prior = prior_precision_spectrum.to(
+                    device=denom.device, dtype=denom.dtype
                 )
+                if prior.ndim == 3:
+                    prior = prior.unsqueeze(0)
 
-            denom_eff = denom + prior
+                if prior.shape == denom.shape:
+                    pass
+                elif (
+                    prior.ndim == 4
+                    and prior.shape[0] == 1
+                    and tuple(prior.shape[1:]) == tuple(denom.shape[1:])
+                ):
+                    prior = prior.expand_as(denom)
+                else:
+                    raise ValueError(
+                        "prior_precision_spectrum must be broadcastable to "
+                        f"{tuple(denom.shape)}, got {tuple(prior.shape)}"
+                    )
 
-        valid = denom_eff > 1e-9
-        torch.div(numer, denom_eff, out=self.volume)
-        self.volume.masked_fill_(~valid, 0)
-        self.downsampled_volumes.clear()
-        self.volume_version += 1
+                denom_eff = denom + prior
+
+            valid = denom_eff > 1e-9
+            torch.div(numer, denom_eff, out=self.volume)
+            self.volume.masked_fill_(~valid, 0)
+            updated = True
+
+        if self.optimizer is not None:
+            self.optimizer.step()
+            updated = True
+
+        if updated:
+            self.mark_updated_()
     
     @torch.no_grad()
     def zero_accum(self, *, set_to_none: bool = False) -> None:

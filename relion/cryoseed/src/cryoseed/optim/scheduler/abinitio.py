@@ -88,7 +88,7 @@ class AbInitioScheduler:
             None if target_healpix_order is None else int(target_healpix_order)
         )
         self.default_full_backprojection = bool(
-            config.modules.volume.full_backprojection
+            config.modules.volume.voxel.full_backprojection
         )
         derived_target_healpix_order = self._required_healpix_order_for_resolution(
             self.target_side_length_resolution

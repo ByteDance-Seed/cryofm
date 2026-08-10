@@ -54,7 +54,9 @@ class HeteroRefineEngine(torch.nn.Module):
         self.auto_resume = bool(auto_resume)
 
         if int(config.modules.volume.num_volumes) <= 1:
-            raise ValueError("heterorefine requires modules.volume.num_volumes > 1")
+            raise ValueError(
+                "heterorefine requires modules.volume.num_volumes > 1"
+            )
 
         dataset = ParticleDataset(
             config.io.star_path,
@@ -350,7 +352,7 @@ class HeteroRefineEngine(torch.nn.Module):
             if self.sampler is not None:
                 self.sampler.set_epoch(epoch)
             self.solver.refresh()
-            self.solver.zero_accum()
+            self.solver.zero()
 
             loader = self.dataloader
             if is_rank0() and tqdm is not None:

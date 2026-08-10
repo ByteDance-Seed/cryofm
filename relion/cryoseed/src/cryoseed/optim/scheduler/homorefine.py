@@ -115,7 +115,7 @@ class HomoRefineScheduler:
         self.ssd_cache_min_side_length = config.homorefine.scheduler.ssd_cache_min_side_length
         self.trans_extent_scale = float(config.homorefine.scheduler.trans_extent_scale)
         self.default_full_backprojection = bool(
-            config.modules.volume.full_backprojection
+            config.modules.volume.voxel.full_backprojection
         )
         self.num_epochs = int(config.homorefine.engine.num_epochs)
         self.first_epoch_ncc = bool(config.homorefine.scheduler.first_epoch_ncc)

@@ -99,10 +99,18 @@ class ParticleMaskConfig:
 
 
 @dataclass
-class VolumeModuleConfig:
-    num_volumes: int = 1
+class VoxelVolumeConfig:
     backproject_chunk: int = 16384
     full_backprojection: bool = False
+    learning_rate: float = 1.0
+    learning_rate_decay: float = 0.9995
+    momentum: float = 0.9
+
+
+@dataclass
+class VolumeModuleConfig:
+    num_volumes: int = 1
+    voxel: VoxelVolumeConfig = field(default_factory=VoxelVolumeConfig)
 
 
 @dataclass
@@ -171,13 +179,6 @@ class AbInitioEngineConfig:
 
 
 @dataclass
-class AbInitioSolverConfig:
-    learning_rate: float = 1.0
-    learning_rate_decay: float = 0.9995
-    momentum: float = 0.9
-
-
-@dataclass
 class AbInitioSchedulerConfig:
     schedule_check_interval_iters: int = 100
     confidence_threshold: float = 0.5
@@ -196,7 +197,6 @@ class AbInitioSchedulerConfig:
 @dataclass
 class AbInitioConfig:
     engine: AbInitioEngineConfig = field(default_factory=AbInitioEngineConfig)
-    solver: AbInitioSolverConfig = field(default_factory=AbInitioSolverConfig)
     scheduler: AbInitioSchedulerConfig = field(default_factory=AbInitioSchedulerConfig)
 
 
@@ -500,9 +500,17 @@ class MainConfig:
 
     @classmethod
     def _build_volume_module(cls, data: Any) -> VolumeModuleConfig:
-        return VolumeModuleConfig(
-            **cls._validate_keys(data, VolumeModuleConfig, path="modules.volume")
+        normalized = cls._validate_keys(
+            data, VolumeModuleConfig, path="modules.volume"
         )
+        normalized["voxel"] = VoxelVolumeConfig(
+            **cls._validate_keys(
+                normalized.get("voxel"),
+                VoxelVolumeConfig,
+                path="modules.volume.voxel",
+            )
+        )
+        return VolumeModuleConfig(**normalized)
 
     @classmethod
     def _build_search_module(cls, data: Any) -> SearchModuleConfig:
@@ -542,9 +550,6 @@ class MainConfig:
         normalized = cls._validate_keys(data, AbInitioConfig, path="abinitio")
         normalized["engine"] = AbInitioEngineConfig(
             **cls._validate_keys(normalized.get("engine"), AbInitioEngineConfig, path="abinitio.engine")
-        )
-        normalized["solver"] = AbInitioSolverConfig(
-            **cls._validate_keys(normalized.get("solver"), AbInitioSolverConfig, path="abinitio.solver")
         )
         normalized["scheduler"] = AbInitioSchedulerConfig(
             **cls._validate_keys(
